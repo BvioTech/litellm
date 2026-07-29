@@ -65,6 +65,39 @@ import {
 } from "./tabVisibilityUtils";
 import TeamMembersComponent from "./TeamMemberTab";
 import { TeamVirtualKeysTable } from "./TeamVirtualKeysTable";
+import { EffectiveMcpServer, resolveEffectiveMcpServers } from "../mcp_server_management/effectiveMcpServers";
+import { useMCPServers } from "../../app/(dashboard)/hooks/mcpServers/useMCPServers";
+import { useMCPToolsets } from "../../app/(dashboard)/hooks/mcpServers/useMCPToolsets";
+
+export const grantedMcpPermissionKeys = (
+  effectiveServers: readonly EffectiveMcpServer[],
+  selectedAccessGroupIds: readonly string[],
+  loadedAccessGroupIds: readonly string[],
+  loadedAccessGroupServerIds: readonly string[],
+): readonly string[] | null => {
+  const granted = effectiveServers
+    .filter(({ source }) => source.kind !== "toolPermission")
+    .map(({ permissionKey }) => permissionKey);
+
+  if (selectedAccessGroupIds.length === 0) {
+    return granted;
+  }
+  const unchanged =
+    selectedAccessGroupIds.length === loadedAccessGroupIds.length &&
+    selectedAccessGroupIds.every((id) => loadedAccessGroupIds.includes(id));
+  return unchanged ? [...granted, ...loadedAccessGroupServerIds] : null;
+};
+
+export const retainedMcpToolPermissions = (
+  toolPermissions: Record<string, string[]>,
+  grantedKeys: readonly string[] | null,
+): Record<string, string[]> => {
+  if (grantedKeys === null) {
+    return toolPermissions;
+  }
+  const granted = new Set(grantedKeys);
+  return Object.fromEntries(Object.entries(toolPermissions).filter(([key]) => granted.has(key)));
+};
 
 export interface TeamMembership {
   user_id: string;
@@ -190,6 +223,8 @@ const TeamInfoView: React.FC<TeamInfoProps> = ({
   const [mcpAccessGroupsLoaded, setMcpAccessGroupsLoaded] = useState(false);
   const [copiedStates, setCopiedStates] = useState<Record<string, boolean>>({});
   const { data: guardrailsData, isLoading: isGuardrailsLoading } = useGuardrails();
+  const { data: allMcpServers = [], isError: mcpServersFailed, isLoading: mcpServersLoading } = useMCPServers();
+  const { data: allMcpToolsets = [], isError: mcpToolsetsFailed } = useMCPToolsets();
   const globalGuardrailNames = guardrailsData?.globalGuardrailNames ?? new Set<string>();
   const [policiesList, setPoliciesList] = useState<string[]>([]);
   const [policyGuardrails, setPolicyGuardrails] = useState<Record<string, string[]>>({});
@@ -567,10 +602,31 @@ const TeamInfoView: React.FC<TeamInfoProps> = ({
         accessGroups: [],
         toolsets: [],
       };
-      const serverIds = new Set(servers || []);
-      const mcpToolPermissions = Object.fromEntries(
-        Object.entries(values.mcp_tool_permissions || {}).filter(([serverId]) => serverIds.has(serverId)),
-      );
+      const submittedToolPermissions: Record<string, string[]> = values.mcp_tool_permissions || {};
+      const mcpResolutionFailed = mcpServersFailed || mcpServersLoading || mcpToolsetsFailed;
+      const effectiveMcpInput = {
+        allServers: allMcpServers,
+        selectedServers: servers || [],
+        selectedAccessGroups: accessGroups || [],
+        selectedToolsets: toolsets || [],
+        toolsets: allMcpToolsets,
+        toolPermissions: submittedToolPermissions,
+      };
+      const grantedKeys = mcpResolutionFailed
+        ? null
+        : grantedMcpPermissionKeys(
+            resolveEffectiveMcpServers(effectiveMcpInput),
+            values.access_group_ids || [],
+            info.access_group_ids || [],
+            info.access_group_mcp_server_ids || [],
+          );
+      const mcpToolPermissions = retainedMcpToolPermissions(submittedToolPermissions, grantedKeys);
+
+      if (grantedKeys === null && Object.keys(submittedToolPermissions).length > 0) {
+        NotificationsManager.warning(
+          "MCP tool permissions were saved unchanged because the servers they grant could not be resolved",
+        );
+      }
 
       updateData.object_permission = {};
       if (servers) {
