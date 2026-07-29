@@ -5,6 +5,7 @@ import { Tooltip } from "antd";
 import { fetchMCPServers, fetchMCPToolsets } from "../networking";
 import { MCPServer, MCPToolset } from "../mcp_tools/types";
 import { ALL_PROXY_MCP_SERVERS_SENTINEL, NO_MCP_SERVERS_SENTINEL } from "../mcp_tools/constants";
+import { mcpServerMatchesIdentifier, mcpToolPermissionKeyFor } from "../mcp_server_management/effectiveMcpServers";
 
 interface MCPServerPermissionsProps {
   mcpServers: string[];
@@ -85,14 +86,25 @@ export function MCPServerPermissions({
     fetchToolsets();
   }, [accessToken, mcpToolsets.length]);
 
-  // Function to get display name for MCP server
-  const getMCPServerDisplayName = (serverId: string) => {
-    const serverDetail = mcpServerDetails.find((server) => server.server_id === serverId);
+  // A grant may name a server by id, name or alias; the backend treats all three alike.
+  const getMCPServerDisplayName = (serverIdentifier: string) => {
+    const serverDetail = mcpServerDetails.find((server) => mcpServerMatchesIdentifier(server, serverIdentifier));
     if (serverDetail) {
+      const label = serverDetail.alias || serverDetail.server_name || serverDetail.server_id;
+      const serverId = serverDetail.server_id;
       const truncatedId = serverId.length > 7 ? `${serverId.slice(0, 3)}...${serverId.slice(-4)}` : serverId;
-      return `${serverDetail.alias} (${truncatedId})`;
+      return `${label} (${truncatedId})`;
     }
-    return serverId;
+    return serverIdentifier;
+  };
+
+  // The allowlist may be keyed by a different identifier than the grant names the server by.
+  const getToolPermissionsFor = (serverIdentifier: string): string[] | undefined => {
+    const serverDetail = mcpServerDetails.find((server) => mcpServerMatchesIdentifier(server, serverIdentifier));
+    if (!serverDetail) {
+      return mcpToolPermissions[serverIdentifier];
+    }
+    return mcpToolPermissions[mcpToolPermissionKeyFor(serverDetail, mcpToolPermissions)];
   };
 
   const blocksAllMcpServers = mcpServers.includes(NO_MCP_SERVERS_SENTINEL);
@@ -132,7 +144,7 @@ export function MCPServerPermissions({
       ) : totalCount > 0 ? (
         <div className="max-h-[400px] overflow-y-auto space-y-2 pr-1">
           {mergedItems.map((item, index) => {
-            const toolsForServer = item.type === "server" ? mcpToolPermissions[item.value] : undefined;
+            const toolsForServer = item.type === "server" ? getToolPermissionsFor(item.value) : undefined;
             const hasToolRestrictions = toolsForServer && toolsForServer.length > 0;
             const isExpanded = expandedServers.has(item.value);
 
