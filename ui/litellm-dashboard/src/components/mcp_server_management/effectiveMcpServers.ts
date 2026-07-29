@@ -11,10 +11,16 @@ export type McpGrantSource =
 
 export interface EffectiveMcpServer {
   readonly server: MCPServer;
-  // The mcp_tool_permissions key holding this server's allowlist. The backend accepts a server
-  // id, name or alias interchangeably, so an API- or config-written entry may use any of them;
-  // reading and writing the same key keeps an edit from leaving the original entry behind.
+  // The mcp_tool_permissions key an edit writes to. The backend accepts a server id, name or
+  // alias interchangeably, so an API- or config-written entry may use any of them; writing the
+  // key already in the map keeps an edit from leaving the original entry behind.
   readonly permissionKey: string;
+  // Other keys in the map that name this same server. The backend unions every key's list, so a
+  // write that touched only `permissionKey` would leave these still granting.
+  readonly supersededKeys: readonly string[];
+  // What this level currently allows on the server: the union across every equivalent key, which
+  // is what the backend enforces. `undefined` means no entry at all, so no restriction from here.
+  readonly allowedTools: readonly string[] | undefined;
   readonly source: McpGrantSource;
 }
 
@@ -40,13 +46,51 @@ const accessGroupNamesOf = (server: MCPServer): readonly string[] =>
 export const mcpServerMatchesIdentifier = (server: MCPServer, identifier: string): boolean =>
   server.server_id === identifier || server.server_name === identifier || server.alias === identifier;
 
+// Every key in the map that names this server, id first so an id key stays the one an edit keeps.
+export const mcpToolPermissionKeysFor = (
+  server: MCPServer,
+  toolPermissions: Readonly<Record<string, readonly string[]>>,
+): readonly string[] =>
+  [server.server_id, server.server_name, server.alias].filter(
+    (identifier): identifier is string => typeof identifier === "string" && Object.hasOwn(toolPermissions, identifier),
+  );
+
 export const mcpToolPermissionKeyFor = (
   server: MCPServer,
   toolPermissions: Readonly<Record<string, readonly string[]>>,
-): string =>
-  [server.server_id, server.server_name, server.alias].find(
-    (identifier): identifier is string => typeof identifier === "string" && Object.hasOwn(toolPermissions, identifier),
-  ) ?? server.server_id;
+): string => mcpToolPermissionKeysFor(server, toolPermissions)[0] ?? server.server_id;
+
+// The union the backend enforces across equivalent keys, first-seen order preserved.
+export const mcpAllowedToolsFor = (
+  server: MCPServer,
+  toolPermissions: Readonly<Record<string, readonly string[]>>,
+): readonly string[] | undefined => {
+  const keys = mcpToolPermissionKeysFor(server, toolPermissions);
+  if (keys.length === 0) return undefined;
+  return [...new Set(keys.flatMap((key) => toolPermissions[key] ?? []))];
+};
+
+// Collapse a server's grant onto one key: the kept key gets exactly what the admin sees, and the
+// equivalent keys are dropped so nothing keeps granting under another spelling. A key that also
+// names a DIFFERENT server (duplicate server names) is never dropped, since that would silently
+// strip the other server's restriction.
+export const applyToolPermissionWrite = ({
+  toolPermissions,
+  entry,
+  allowed,
+}: {
+  readonly toolPermissions: Readonly<Record<string, readonly string[]>>;
+  readonly entry: EffectiveMcpServer;
+  readonly allowed: readonly string[];
+}): Record<string, string[]> => {
+  const kept: [string, string[]][] = Object.entries(toolPermissions)
+    .filter(([key]) => !entry.supersededKeys.includes(key))
+    .map(([key, tools]) => [key, key === entry.permissionKey ? [...allowed] : [...tools]]);
+  const withWrite: [string, string[]][] = Object.hasOwn(toolPermissions, entry.permissionKey)
+    ? kept
+    : [...kept, [entry.permissionKey, [...allowed]]];
+  return Object.fromEntries(withWrite);
+};
 
 export const resolveEffectiveMcpServers = ({
   allServers,
@@ -56,11 +100,20 @@ export const resolveEffectiveMcpServers = ({
   toolsets,
   toolPermissions,
 }: ResolveInput): readonly EffectiveMcpServer[] => {
-  const entry = (server: MCPServer, source: McpGrantSource): EffectiveMcpServer => ({
-    server,
-    permissionKey: mcpToolPermissionKeyFor(server, toolPermissions),
-    source,
-  });
+  const namesOneServerOnly = (key: string): boolean =>
+    allServers.filter((server) => mcpServerMatchesIdentifier(server, key)).length === 1;
+
+  const entry = (server: MCPServer, source: McpGrantSource): EffectiveMcpServer => {
+    const keys = mcpToolPermissionKeysFor(server, toolPermissions);
+    const permissionKey = keys[0] ?? server.server_id;
+    return {
+      server,
+      permissionKey,
+      supersededKeys: keys.filter((key) => key !== permissionKey && namesOneServerOnly(key)),
+      allowedTools: mcpAllowedToolsFor(server, toolPermissions),
+      source,
+    };
+  };
 
   const direct = selectedServers.flatMap((identifier) =>
     allServers

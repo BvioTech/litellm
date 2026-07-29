@@ -5,7 +5,7 @@ import { Tooltip } from "antd";
 import { fetchMCPServers, fetchMCPToolsets } from "../networking";
 import { MCPServer, MCPToolset } from "../mcp_tools/types";
 import { ALL_PROXY_MCP_SERVERS_SENTINEL, NO_MCP_SERVERS_SENTINEL } from "../mcp_tools/constants";
-import { mcpServerMatchesIdentifier, mcpToolPermissionKeyFor } from "../mcp_server_management/effectiveMcpServers";
+import { mcpAllowedToolsFor, mcpServerMatchesIdentifier } from "../mcp_server_management/effectiveMcpServers";
 
 interface MCPServerPermissionsProps {
   mcpServers: string[];
@@ -98,13 +98,14 @@ export function MCPServerPermissions({
     return serverIdentifier;
   };
 
-  // The allowlist may be keyed by a different identifier than the grant names the server by.
-  const getToolPermissionsFor = (serverIdentifier: string): string[] | undefined => {
+  // The allowlist may be keyed by a different identifier than the grant names the server by, and
+  // several equivalent keys may each carry part of it; the backend enforces their union.
+  const getToolPermissionsFor = (serverIdentifier: string): readonly string[] | undefined => {
     const serverDetail = mcpServerDetails.find((server) => mcpServerMatchesIdentifier(server, serverIdentifier));
     if (!serverDetail) {
       return mcpToolPermissions[serverIdentifier];
     }
-    return mcpToolPermissions[mcpToolPermissionKeyFor(serverDetail, mcpToolPermissions)];
+    return mcpAllowedToolsFor(serverDetail, mcpToolPermissions);
   };
 
   const blocksAllMcpServers = mcpServers.includes(NO_MCP_SERVERS_SENTINEL);

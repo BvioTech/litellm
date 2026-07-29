@@ -435,4 +435,80 @@ describe("MCPToolPermissions", () => {
       expect(mockOnChange).toHaveBeenCalledWith({ github_mcp: [] });
     });
   });
+
+  describe("a server named by several equivalent keys", () => {
+    const namedServer = {
+      server_id: "1f4bd6c1-0000-4000-8000-000000000001",
+      server_name: "github_mcp",
+      alias: "GitHub",
+      mcp_access_groups: ["production-group"],
+    };
+    const namedTools = [
+      { name: "list_issues", description: "List issues" },
+      { name: "create_issue", description: "Open an issue" },
+      { name: "delete_issue", description: "Delete an issue" },
+    ];
+
+    const renderWithBothKeys = (onChange: () => void) =>
+      renderWithProviders(
+        <MCPToolPermissions
+          accessToken={mockAccessToken}
+          selectedServers={[namedServer.server_id]}
+          toolPermissions={{ [namedServer.server_id]: ["list_issues"], github_mcp: ["create_issue"] }}
+          onChange={onChange}
+        />,
+      );
+
+    beforeEach(() => {
+      vi.mocked(networking.fetchMCPServers).mockResolvedValue([namedServer]);
+      vi.mocked(networking.fetchMCPToolsets).mockResolvedValue([]);
+      vi.mocked(networking.listMCPTools).mockResolvedValue({ tools: namedTools, error: false });
+    });
+
+    it("renders one card showing the union both keys grant", async () => {
+      renderWithBothKeys(vi.fn());
+
+      expect(await screen.findByText("github_mcp")).toBeInTheDocument();
+      expect(screen.getAllByText("github_mcp")).toHaveLength(1);
+      expect(await screen.findByText("list_issues")).toBeInTheDocument();
+
+      // Flat view keeps checkbox order identical to the fetched tool order.
+      await userEvent.click(screen.getByText("Flat List"));
+      const [listIssues, createIssue, deleteIssue] = screen.getAllByRole("checkbox");
+      expect(listIssues).toBeChecked();
+      expect(createIssue).toBeChecked();
+      expect(deleteIssue).not.toBeChecked();
+    });
+
+    it("removes a deselected tool from every equivalent key, leaving one entry for the server", async () => {
+      const mockOnChange = vi.fn();
+      renderWithBothKeys(mockOnChange);
+
+      expect(await screen.findByText("list_issues")).toBeInTheDocument();
+      await userEvent.click(screen.getByText("Flat List"));
+      await userEvent.click(screen.getAllByRole("checkbox")[0]);
+
+      const written = mockOnChange.mock.calls.at(-1)?.[0] as Record<string, string[]>;
+      expect(Object.keys(written)).toEqual([namedServer.server_id]);
+      expect(written[namedServer.server_id]).not.toContain("list_issues");
+      expect(written[namedServer.server_id]).toContain("create_issue");
+    });
+
+    it("badges the server once, by its strongest grant, when a key and a group both name it", async () => {
+      renderWithProviders(
+        <MCPToolPermissions
+          accessToken={mockAccessToken}
+          selectedServers={[]}
+          selectedAccessGroups={["production-group"]}
+          toolPermissions={{ github_mcp: ["list_issues"] }}
+          onChange={vi.fn()}
+        />,
+      );
+
+      expect(await screen.findByText("github_mcp")).toBeInTheDocument();
+      expect(screen.getByText("Via access group: production-group")).toBeInTheDocument();
+      expect(screen.queryByText("Via tool permissions")).not.toBeInTheDocument();
+      expect(screen.queryAllByText(/^Via /)).toHaveLength(1);
+    });
+  });
 });
