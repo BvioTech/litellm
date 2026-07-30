@@ -3,7 +3,11 @@ import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderWithProviders, testQueryClient } from "../../../tests/test-utils";
-import TeamInfoView, { grantedMcpPermissionKeys, retainedMcpToolPermissions } from "./TeamInfo";
+import TeamInfoView, {
+  grantedMcpPermissionKeys,
+  mcpToolPermissionNotice,
+  retainedMcpToolPermissions,
+} from "./TeamInfo";
 import type { EffectiveMcpServer } from "@/components/mcp_server_management/effectiveMcpServers";
 
 vi.mock("@/components/networking", () => ({
@@ -1333,41 +1337,77 @@ describe("TeamInfoView", () => {
       }) as EffectiveMcpServer;
 
     it("counts a server granted directly or through a group as granted", () => {
-      expect(grantedMcpPermissionKeys([effective("a", "direct"), effective("b", "accessGroup")], [], [], [])).toEqual([
-        "a",
-        "b",
-      ]);
+      expect(grantedMcpPermissionKeys([effective("a", "direct"), effective("b", "accessGroup")], [], [], [])).toEqual({
+        kind: "resolved",
+        keys: ["a", "b"],
+      });
     });
 
     it("does not let a tool-permission entry justify keeping itself", () => {
-      expect(grantedMcpPermissionKeys([effective("stale", "toolPermission")], [], [], [])).toEqual([]);
+      expect(grantedMcpPermissionKeys([effective("stale", "toolPermission")], [], [], [])).toEqual({
+        kind: "resolved",
+        keys: [],
+      });
     });
 
     it("adds the unified access group servers when that selection is unchanged", () => {
-      expect(grantedMcpPermissionKeys([effective("a", "direct")], ["ag-1"], ["ag-1"], ["unified-server"])).toEqual([
-        "a",
-        "unified-server",
-      ]);
+      expect(grantedMcpPermissionKeys([effective("a", "direct")], ["ag-1"], ["ag-1"], ["unified-server"])).toEqual({
+        kind: "resolved",
+        keys: ["a", "unified-server"],
+      });
     });
 
-    it("reports unresolvable when the unified access group selection changed", () => {
+    it("treats a reordered unified access group selection as unchanged", () => {
+      expect(
+        grantedMcpPermissionKeys([effective("a", "direct")], ["ag-2", "ag-1"], ["ag-1", "ag-2"], ["unified-server"]),
+      ).toEqual({ kind: "resolved", keys: ["a", "unified-server"] });
+    });
+
+    it("does not mistake a duplicated id for an unchanged selection", () => {
+      expect(grantedMcpPermissionKeys([effective("a", "direct")], ["ag-1", "ag-1"], ["ag-1", "ag-2"], ["u"])).toEqual({
+        kind: "accessGroupsChanged",
+      });
+    });
+
+    it("reports the changed access group selection when it differs", () => {
       expect(
         grantedMcpPermissionKeys([effective("a", "direct")], ["ag-1", "ag-2"], ["ag-1"], ["unified-server"]),
-      ).toBeNull();
+      ).toEqual({ kind: "accessGroupsChanged" });
     });
   });
 
   describe("retainedMcpToolPermissions", () => {
     it("keeps only entries whose server is still granted", () => {
-      expect(retainedMcpToolPermissions({ a: ["t"], b: ["t"] }, ["a"])).toEqual({ a: ["t"] });
+      expect(retainedMcpToolPermissions({ a: ["t"], b: ["t"] }, { kind: "resolved", keys: ["a"] })).toEqual({
+        a: ["t"],
+      });
     });
 
-    it("keeps everything when the granted set is unresolvable", () => {
-      expect(retainedMcpToolPermissions({ a: ["t"], b: ["t"] }, null)).toEqual({ a: ["t"], b: ["t"] });
+    it("keeps everything when the server lookup failed", () => {
+      expect(retainedMcpToolPermissions({ a: ["t"], b: ["t"] }, { kind: "lookupFailed" })).toEqual({
+        a: ["t"],
+        b: ["t"],
+      });
+    });
+
+    it("keeps everything when the access group selection changed", () => {
+      expect(retainedMcpToolPermissions({ a: ["t"], b: ["t"] }, { kind: "accessGroupsChanged" })).toEqual({
+        a: ["t"],
+        b: ["t"],
+      });
     });
 
     it("drops everything when nothing is granted", () => {
-      expect(retainedMcpToolPermissions({ a: ["t"] }, [])).toEqual({});
+      expect(retainedMcpToolPermissions({ a: ["t"] }, { kind: "resolved", keys: [] })).toEqual({});
+    });
+
+    it("explains a failed lookup and a changed access group differently, and stays silent when resolved", () => {
+      const failed = mcpToolPermissionNotice({ kind: "lookupFailed" });
+      const changed = mcpToolPermissionNotice({ kind: "accessGroupsChanged" });
+      expect(failed).toMatch(/could not be loaded/);
+      expect(changed).toMatch(/access groups/);
+      expect(failed).not.toEqual(changed);
+      expect(mcpToolPermissionNotice({ kind: "resolved", keys: [] })).toBeNull();
     });
   });
 });
