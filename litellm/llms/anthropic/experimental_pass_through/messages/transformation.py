@@ -2,11 +2,6 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import httpx
 
-from litellm.constants import (
-    DEFAULT_REASONING_EFFORT_HIGH_THINKING_BUDGET,
-    DEFAULT_REASONING_EFFORT_MEDIUM_THINKING_BUDGET,
-    DEFAULT_REASONING_EFFORT_XHIGH_THINKING_BUDGET,
-)
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.litellm_core_utils.litellm_logging import verbose_logger
 from litellm.llms.base_llm.anthropic_messages.transformation import (
@@ -310,40 +305,6 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
             optional_params["output_config"] = existing_output_config
 
     @staticmethod
-    def _translate_legacy_thinking_for_adaptive_model(
-        model: str, optional_params: Dict, custom_llm_provider: str
-    ) -> None:
-        """Translate legacy ``thinking.type=enabled`` to adaptive for 4.6/4.7.
-        Caller-provided ``output_config.effort`` is never overridden.
-        """
-        from litellm.llms.anthropic.chat.transformation import AnthropicConfig
-
-        if not AnthropicModelInfo._is_adaptive_thinking_model(model, custom_llm_provider):
-            return
-        thinking = optional_params.get("thinking")
-        if not isinstance(thinking, dict) or thinking.get("type") != "enabled":
-            return
-
-        budget = int(thinking.get("budget_tokens") or 0)
-        if budget >= DEFAULT_REASONING_EFFORT_XHIGH_THINKING_BUDGET and (
-            AnthropicConfig._supports_effort_level(model, "xhigh", custom_llm_provider)
-        ):
-            effort = "xhigh"
-        elif budget >= DEFAULT_REASONING_EFFORT_HIGH_THINKING_BUDGET:
-            effort = "high"
-        elif budget >= DEFAULT_REASONING_EFFORT_MEDIUM_THINKING_BUDGET:
-            effort = "medium"
-        else:
-            effort = "low"
-
-        optional_params["thinking"] = {"type": "adaptive"}
-        existing_output_config = optional_params.get("output_config")
-        if not isinstance(existing_output_config, dict):
-            existing_output_config = {}
-        existing_output_config.setdefault("effort", effort)
-        optional_params["output_config"] = existing_output_config
-
-    @staticmethod
     def _translate_adaptive_effort_for_non_adaptive_model(
         model: str, optional_params: Dict, max_tokens: Optional[int], custom_llm_provider: str
     ) -> None:
@@ -502,7 +463,9 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
             custom_llm_provider=self._resolved_provider,
         )
 
-        self._translate_legacy_thinking_for_adaptive_model(
+        from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+        AnthropicConfig._translate_legacy_thinking_for_adaptive_model(
             model=model,
             optional_params=anthropic_messages_optional_request_params,
             custom_llm_provider=self._resolved_provider,

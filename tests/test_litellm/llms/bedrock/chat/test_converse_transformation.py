@@ -15,6 +15,7 @@ import litellm
 from litellm import ModelResponse, RateLimitError, completion
 from litellm.llms.bedrock.chat.converse_transformation import AmazonConverseConfig
 from litellm.types.llms.bedrock import ConverseTokenUsageBlock
+from litellm.utils import get_optional_params
 
 
 def test_transform_usage():
@@ -368,6 +369,47 @@ def test_output_config_effort_forwarded_into_additional_request_fields(model):
 
     additional = result.get("additionalModelRequestFields", {})
     assert additional.get("output_config") == {"effort": "high"}
+
+
+@pytest.mark.parametrize(
+    ("base_model", "expected_fields"),
+    [
+        (
+            "global.anthropic.claude-opus-5",
+            {
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": "high"},
+            },
+        ),
+        (
+            "global.anthropic.claude-opus-4-5-20251101-v1:0",
+            {"thinking": {"type": "enabled", "budget_tokens": 4096}},
+        ),
+    ],
+)
+def test_opaque_application_profile_uses_base_model_for_thinking(base_model, expected_fields):
+    model = (
+        "arn:aws:bedrock:us-west-2:123456789012:"
+        "application-inference-profile/abcdef123456"
+    )
+    optional_params = get_optional_params(
+        model=model,
+        custom_llm_provider="bedrock",
+        base_model=base_model,
+        max_tokens=32000,
+        thinking={"type": "enabled", "budget_tokens": 4096},
+    )
+    optional_params.pop("stream", None)
+
+    result = AmazonConverseConfig().transform_request(
+        model=model,
+        messages=[{"role": "user", "content": "hi"}],
+        optional_params=optional_params,
+        litellm_params={"base_model": base_model},
+        headers={},
+    )
+
+    assert result["additionalModelRequestFields"] == expected_fields
 
 
 def test_output_config_format_translated_to_native_output_config_converse():

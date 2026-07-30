@@ -1227,6 +1227,7 @@ class AmazonConverseConfig(BaseConfig):
         self, optional_params: dict, model: str, drop_params: bool = False
     ) -> Tuple[dict, dict, dict, Optional[OutputConfigBlock]]:
         """Prepare and separate request parameters."""
+        output_config_model = optional_params.pop("_output_config_model", None)
         # Consume the internal ``_output_config_normalized`` marker set by
         # ``_handle_reasoning_effort_parameter`` so it does not linger on the
         # caller's ``optional_params`` after the transformation returns.
@@ -1310,21 +1311,25 @@ class AmazonConverseConfig(BaseConfig):
         additional_request_params = filter_exceptions_from_params(additional_request_params)
 
         if anthropic_output_config is not None and isinstance(anthropic_output_config, dict):
-            if base_model.startswith("anthropic"):
-                if litellm.drop_params is True and not AnthropicConfig._model_supports_effort_param(model, "bedrock"):
+            capability_model = output_config_model if isinstance(output_config_model, str) else model
+            output_config_base_model = BedrockModelInfo.get_base_model(capability_model)
+            if output_config_base_model.startswith("anthropic"):
+                if litellm.drop_params is True and not AnthropicConfig._model_supports_effort_param(
+                    capability_model, "bedrock"
+                ):
                     litellm.verbose_logger.warning(
                         DROP_UNSUPPORTED_OUTPUT_CONFIG_WARNING,
-                        model,
+                        capability_model,
                     )
                 else:
                     if not anthropic_output_config_already_normalized:
                         normalize_bedrock_opus_output_config_effort(
-                            model=model,
+                            model=capability_model,
                             output_config=anthropic_output_config,
                         )
                     effort = anthropic_output_config.get("effort")
                     if effort is not None:
-                        self._validate_anthropic_adaptive_effort(model=model, effort=effort)
+                        self._validate_anthropic_adaptive_effort(model=capability_model, effort=effort)
                     additional_request_params["output_config"] = anthropic_output_config
 
         return (

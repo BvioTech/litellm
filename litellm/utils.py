@@ -4079,6 +4079,15 @@ def get_optional_params(
                 optional_params = BedrockModelInfo.map_claude_platform_auth_params(
                     passed_params=passed_params, optional_params=optional_params
                 )
+        if bedrock_route in ("converse", "converse_like"):
+            capability_model = base_model if isinstance(base_model, str) and base_model else model
+            translated = litellm.AnthropicConfig._translate_legacy_thinking_for_adaptive_model(
+                model=capability_model,
+                optional_params=optional_params,
+                custom_llm_provider="bedrock",
+            )
+            if translated and isinstance(base_model, str) and base_model:
+                optional_params["_output_config_model"] = base_model
     elif custom_llm_provider == "cloudflare":
         optional_params = litellm.CloudflareChatConfig().map_openai_params(
             model=model,

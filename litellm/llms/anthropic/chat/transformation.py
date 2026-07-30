@@ -1259,6 +1259,36 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             return thinking
         return AnthropicThinkingParam(type=thinking.get("type", "enabled"), budget_tokens=max_tokens - 1)
 
+    @staticmethod
+    def _translate_legacy_thinking_for_adaptive_model(
+        model: str, optional_params: Dict, custom_llm_provider: str
+    ) -> bool:
+        if not AnthropicConfig._is_adaptive_thinking_model(model, custom_llm_provider):
+            return False
+        thinking = optional_params.get("thinking")
+        if not isinstance(thinking, dict) or thinking.get("type") != "enabled":
+            return False
+
+        budget = int(thinking.get("budget_tokens") or 0)
+        if budget >= DEFAULT_REASONING_EFFORT_XHIGH_THINKING_BUDGET and AnthropicConfig._supports_effort_level(
+            model, "xhigh", custom_llm_provider
+        ):
+            effort = "xhigh"
+        elif budget >= DEFAULT_REASONING_EFFORT_HIGH_THINKING_BUDGET:
+            effort = "high"
+        elif budget >= DEFAULT_REASONING_EFFORT_MEDIUM_THINKING_BUDGET:
+            effort = "medium"
+        else:
+            effort = "low"
+
+        optional_params["thinking"] = {"type": "adaptive"}
+        output_config = optional_params.get("output_config")
+        if not isinstance(output_config, dict):
+            output_config = {}
+        output_config.setdefault("effort", effort)
+        optional_params["output_config"] = output_config
+        return True
+
     def _extract_json_schema_from_response_format(self, value: Optional[dict]) -> Optional[dict]:
         if value is None:
             return None
