@@ -1456,7 +1456,11 @@ class TestLLMClassifier:
         body = call_kwargs["proxy_server_request"]["body"]
         assert body["model"] == "haiku-classifier"
         assert body["messages"] == call_kwargs["messages"]
-        assert "explain quantum tunneling in depth" in body["messages"][0]["content"]
+        assert len(body["messages"]) == 2
+        assert body["messages"][0]["role"] == "system"
+        assert "Tiers:" in body["messages"][0]["content"]
+        assert body["messages"][1]["role"] == "user"
+        assert "explain quantum tunneling in depth" in body["messages"][1]["content"]
         assert body["response_format"]["type"] == "json_schema"
         assert body["response_format"]["json_schema"]["schema"]["properties"]["tier"]["enum"] == [
             "SIMPLE",
@@ -3559,3 +3563,224 @@ class TestEscalationKeywords:
             messages=[{"role": "user", "content": "LITELLM ESCALATE do better"}],
         )
         assert result.model == "o1-b"  # unchanged: no random hop to o1-a / o1-c
+
+
+class TestContextAwareClassifier:
+    """Test the new classifier context window and trajectory signals."""
+
+    def test_extract_current_ask_skips_tool_results(self):
+        """Test that tool-result user messages are skipped when finding the current ask."""
+        from litellm.router_strategy.complexity_router.complexity_router import _extract_current_ask_and_system_prompt
+
+        messages = [
+            {"role": "user", "content": "Write a web scraper"},
+            {
+                "role": "assistant",
+                "content": "I'll create a scraper using BeautifulSoup...",
+            },
+            {
+                "role": "user",
+                "content": '{"type": "tool_result", "tool_use_id": "x", "content": "...output..."}',
+            },
+            {
+                "role": "user",
+                "content": "Now add error handling",
+            },
+        ]
+        current_ask, system_prompt = _extract_current_ask_and_system_prompt(messages)
+        assert current_ask == "Now add error handling"
+
+    def test_extract_current_ask_keeps_prose_mentioning_tool_result(self):
+        """A real human question that mentions tool_result in prose must NOT be skipped.
+
+        The skip predicate keys off the structured `"type": "tool_result"` block shape,
+        not a bare "tool_result" substring, so a developer asking about tool results is
+        still treated as the live ask.
+        """
+        from litellm.router_strategy.complexity_router.complexity_router import _extract_current_ask_and_system_prompt
+
+        messages = [
+            {"role": "user", "content": "Set up the agent loop"},
+            {"role": "assistant", "content": "Done"},
+            {"role": "user", "content": "why does my tool_result handler crash on empty output?"},
+        ]
+        current_ask, _ = _extract_current_ask_and_system_prompt(messages)
+        assert current_ask == "why does my tool_result handler crash on empty output?"
+
+    def test_extract_current_ask_skips_system_reminders(self):
+        """Test that <system-reminder> blocks are skipped when finding the current ask."""
+        from litellm.router_strategy.complexity_router.complexity_router import _extract_current_ask_and_system_prompt
+
+        messages = [
+            {"role": "user", "content": "Build a REST API"},
+            {
+                "role": "assistant",
+                "content": "I can help with that",
+            },
+            {
+                "role": "user",
+                "content": "<system-reminder>This is Claude Code harness reminder text</system-reminder>",
+            },
+            {
+                "role": "user",
+                "content": "Can it handle rate limiting?",
+            },
+        ]
+        current_ask, _ = _extract_current_ask_and_system_prompt(messages)
+        assert current_ask == "Can it handle rate limiting?"
+
+    def test_extract_prior_user_turns(self):
+        """Test extraction of bounded prior user turns, respecting window size and truncation."""
+        from litellm.router_strategy.complexity_router.complexity_router import _extract_prior_user_turns
+
+        messages = [
+            {"role": "user", "content": "First request"},
+            {"role": "assistant", "content": "First response"},
+            {"role": "user", "content": "Second request with more details and longer text"},
+            {"role": "assistant", "content": "Second response"},
+            {"role": "user", "content": "Third request"},
+        ]
+
+        prior_turns = _extract_prior_user_turns(messages, window_size=2, per_turn_chars=30)
+
+        assert len(prior_turns) == 2
+        assert "Second request" in prior_turns[0]
+        assert len(prior_turns[0]) == 30
+        assert prior_turns[1] == "Third request"
+
+    def test_extract_prior_user_turns_skips_tool_results(self):
+        """Test that prior-turn extraction skips tool results."""
+        from litellm.router_strategy.complexity_router.complexity_router import _extract_prior_user_turns
+
+        messages = [
+            {"role": "user", "content": "Real question 1"},
+            {"role": "assistant", "content": "Answer 1"},
+            {
+                "role": "user",
+                "content": '{"type": "tool_result", "content": "..."}',
+            },
+            {"role": "user", "content": "Real question 2"},
+        ]
+
+        prior_turns = _extract_prior_user_turns(messages, window_size=3, per_turn_chars=100)
+
+        assert len(prior_turns) == 2
+        assert "Real question 1" in prior_turns[0]
+        assert "Real question 2" in prior_turns[1]
+        assert 'tool_result' not in str(prior_turns)
+
+    @pytest.mark.asyncio
+    async def test_llm_classifier_includes_prior_turns_context(self, llm_complexity_router, mock_router_instance):
+        """Test that the LLM classifier receives prior-turn context in the user message."""
+        mock_router_instance.acompletion = AsyncMock(return_value=_llm_response('{"tier": "COMPLEX"}'))
+
+        messages = [
+            {"role": "user", "content": "Design a microservice architecture"},
+            {"role": "assistant", "content": "Here's a design..."},
+            {"role": "user", "content": "How do we handle failures?"},
+        ]
+
+        await llm_complexity_router.aclassify(
+            "How do we handle failures?",
+            system_prompt="You are helpful",
+            messages=messages,
+        )
+
+        call_kwargs = mock_router_instance.acompletion.call_args.kwargs
+        messages_list = call_kwargs["messages"]
+
+        assert len(messages_list) == 2
+        assert messages_list[0]["role"] == "system"
+        assert "Tiers:" in messages_list[0]["content"]
+        assert messages_list[1]["role"] == "user"
+
+        user_payload = messages_list[1]["content"]
+        assert "Recent conversation" in user_payload
+        assert "Design a microservice architecture" in user_payload
+        assert "How do we handle failures?" in user_payload
+        assert "Session: turn" in user_payload
+
+    @pytest.mark.asyncio
+    async def test_llm_classifier_system_prompt_cached_after_first_turn(
+        self, mock_router_instance, llm_classifier_config
+    ):
+        """Test that system prompt is omitted after first turn for caching efficiency."""
+        llm_router = ComplexityRouter(
+            model_name="test-router",
+            litellm_router_instance=mock_router_instance,
+            complexity_router_config={
+                **llm_classifier_config,
+                "classifier_context_system_prompt_cache_ttl_turns": 1,
+            },
+        )
+
+        mock_router_instance.acompletion = AsyncMock(return_value=_llm_response('{"tier": "MEDIUM"}'))
+        mock_router_instance.cache = AsyncMock()
+
+        request_kwargs = {"litellm_metadata": {"session_id": "session-1"}}
+
+        mock_router_instance.cache.async_get_cache = AsyncMock(return_value=None)
+        mock_router_instance.cache.async_set_cache = AsyncMock()
+
+        messages = [{"role": "user", "content": "Turn 1"}]
+
+        await llm_router.aclassify(
+            "Turn 1",
+            system_prompt="Context",
+            request_kwargs=request_kwargs,
+            messages=messages,
+            session_id="session-1",
+        )
+
+        call_kwargs_turn1 = mock_router_instance.acompletion.call_args.kwargs
+        user_payload_turn1 = call_kwargs_turn1["messages"][1]["content"]
+        assert "Context:" in user_payload_turn1
+
+        mock_router_instance.acompletion.reset_mock()
+        mock_router_instance.cache.async_get_cache = AsyncMock(return_value=1)
+
+        messages.append({"role": "assistant", "content": "Response 1"})
+        messages.append({"role": "user", "content": "Turn 2"})
+
+        await llm_router.aclassify(
+            "Turn 2",
+            system_prompt="Context",
+            request_kwargs=request_kwargs,
+            messages=messages,
+            session_id="session-1",
+        )
+
+        call_kwargs_turn2 = mock_router_instance.acompletion.call_args.kwargs
+        user_payload_turn2 = call_kwargs_turn2["messages"][1]["content"]
+        assert "Context:" not in user_payload_turn2
+
+    @pytest.mark.asyncio
+    async def test_prior_turns_in_multi_turn_conversation_with_tool_results(
+        self, llm_complexity_router, mock_router_instance
+    ):
+        """Test that prior-turn context correctly handles agentic conversations with tool results."""
+        mock_router_instance.acompletion = AsyncMock(return_value=_llm_response('{"tier": "COMPLEX"}'))
+
+        messages = [
+            {"role": "user", "content": "Fix the login bug"},
+            {"role": "assistant", "content": "I'll analyze the code..."},
+            {
+                "role": "user",
+                "content": '{"type": "tool_result", "tool_use_id": "search", "content": "Auth flow code"}',
+            },
+            {"role": "assistant", "content": "I see the issue..."},
+            {"role": "user", "content": "Now add the token refresh logic"},
+        ]
+
+        await llm_complexity_router.aclassify(
+            "Now add the token refresh logic",
+            messages=messages,
+        )
+
+        call_kwargs = mock_router_instance.acompletion.call_args.kwargs
+        user_payload = call_kwargs["messages"][1]["content"]
+
+        assert "Fix the login bug" in user_payload
+        assert "Now add the token refresh logic" in user_payload
+        assert "tool_result" not in user_payload
+        assert "Auth flow code" not in user_payload

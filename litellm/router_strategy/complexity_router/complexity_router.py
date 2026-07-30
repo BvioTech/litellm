@@ -18,7 +18,8 @@ from __future__ import annotations
 import asyncio
 import random
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from itertools import islice
 from typing import TYPE_CHECKING, Any, Literal, Union, cast
 
 from pydantic import BaseModel
@@ -122,6 +123,94 @@ def _effective_turn_off_message_logging(request_kwargs: Mapping[str, Any] | None
     return initialize_standard_callback_dynamic_params(dict(request_kwargs) if request_kwargs else {}).get(
         "turn_off_message_logging"
     )
+
+
+def _message_text(content: object) -> str:
+    """Flatten a message's content field to plain text, joining multi-part text blocks."""
+    if isinstance(content, list):
+        parts = tuple(part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text")
+        return " ".join(parts).strip()
+    return content if isinstance(content, str) else ""
+
+
+def _extract_current_ask_and_system_prompt(
+    messages: Sequence[Mapping[str, object]],
+) -> tuple[str | None, str | None]:
+    """
+    Extract the last real human ask and system prompt from messages, skipping tool-result and system-reminder turns.
+
+    Distinguishes between the "current ask" (the last user message that is not a tool result or harness reminder)
+    and the "last message" (which may be a tool result blob in agentic conversations). This prevents
+    multi-turn classification from being blinded by plumbing.
+
+    Returns:
+        (current_ask, system_prompt) where current_ask is the text of the last real human ask
+        (skipping tool-result and system-reminder user messages), and system_prompt is the last
+        system-role message. Both are None if not found.
+    """
+    current_ask: str | None = None
+    system_prompt: str | None = None
+
+    for msg in reversed(messages):
+        role = msg.get("role", "")
+        content = _message_text(msg.get("content") or "")
+        if not content:
+            continue
+        if role == "system" and system_prompt is None:
+            system_prompt = content
+        elif role == "user" and current_ask is None and not _is_tool_result_or_harness_message(content):
+            current_ask = content
+        if current_ask is not None and system_prompt is not None:
+            break
+
+    return current_ask, system_prompt
+
+
+def _is_tool_result_or_harness_message(text: str) -> bool:
+    """
+    Detect if a user-role message is a tool result or harness plumbing, not a real human ask.
+
+    Tool results from agentic execution appear as user messages carrying a serialized
+    structured tool-output block (e.g. `{"type": "tool_result", ...}`). System reminders
+    (Claude Code harness system-prompt fragments) appear as <system-reminder> blocks. Both
+    are indicators that this is not the live human ask.
+
+    Checks for the structured `"type": "tool_result"` key-value pair rather than a bare
+    "tool_result" substring, so a real human question that happens to mention tool results
+    in prose (e.g. "why does my tool_result handler crash?") is not misclassified as plumbing.
+    """
+    if not text:
+        return False
+    text_lower = text.lower()
+    if "<system-reminder>" in text_lower or "</system-reminder>" in text_lower:
+        return True
+    if re.search(r'"type"\s*:\s*"tool_result"', text_lower):
+        return True
+    return False
+
+
+def _extract_prior_user_turns(
+    messages: Sequence[Mapping[str, object]],
+    window_size: int,
+    per_turn_chars: int,
+) -> tuple[str, ...]:
+    """
+    Extract the last N real human ask user turns (not tool results or harness messages) before the current ask.
+
+    Returns up to window_size prior user-turn texts, in chronological order (oldest first).
+    Each text is truncated to per_turn_chars characters. Tool-result and system-reminder turns are skipped.
+    """
+    if window_size <= 0 or not messages:
+        return ()
+
+    real_turns_newest_first = (
+        text[:per_turn_chars]
+        for msg in reversed(messages)
+        if msg.get("role") == "user"
+        and (text := _message_text(msg.get("content") or ""))
+        and not _is_tool_result_or_harness_message(text)
+    )
+    return tuple(reversed(tuple(islice(real_turns_newest_first, window_size))))
 
 
 class DimensionScore:
@@ -402,6 +491,8 @@ class ComplexityRouter(CustomLogger):
         prompt: str,
         system_prompt: str | None = None,
         request_kwargs: dict[str, Any] | None = None,
+        messages: Sequence[Mapping[str, object]] | None = None,
+        session_id: str | None = None,
     ) -> tuple[ComplexityTier, float, list[str]]:
         """
         Classify a prompt by complexity, using the LLM classifier when configured.
@@ -413,7 +504,7 @@ class ComplexityRouter(CustomLogger):
             return self.classify(prompt, system_prompt)
 
         try:
-            tier = await self._classify_with_llm(prompt, system_prompt, request_kwargs)
+            tier = await self._classify_with_llm(prompt, system_prompt, request_kwargs, messages, session_id)
             return tier, 1.0, [f"llm-classifier:{tier.value}"]
         except Exception as e:  # noqa: BLE001 -- external LLM call can fail in many distinct ways (timeout, provider error, validation, parse error); any failure must fall back to the heuristic scorer
             verbose_router_logger.warning(
@@ -426,34 +517,77 @@ class ComplexityRouter(CustomLogger):
         prompt: str,
         system_prompt: str | None = None,
         request_kwargs: dict[str, Any] | None = None,
+        messages: Sequence[Mapping[str, object]] | None = None,
+        session_id: str | None = None,
     ) -> ComplexityTier:
-        """Call the configured classifier model and parse its structured tier response."""
+        """
+        Call the configured classifier model with system/user role split and trajectory context.
+
+        Builds a structured classification prompt with:
+        - System message: stable classifier rubric and output schema (cached per session)
+        - User message: variable payload including prior-turn context, trajectory signals, and current ask
+
+        Args:
+            prompt: The current user ask text (already extracted as the real human ask, not tool results)
+            system_prompt: The caller's system prompt (included only on early turns for caching efficiency)
+            request_kwargs: Request metadata for spend attribution
+            messages: Full message history for extracting prior turns and trajectory signals
+            session_id: Session identifier for turn-count tracking
+        """
         llm_config = self.config.classifier_llm_config
         if llm_config is None:
             raise ValueError("classifier_llm_config is not set")
 
-        system_context = f"Context: {system_prompt}\n\n" if system_prompt else ""
-        classification_prompt = _CLASSIFICATION_PROMPT_TEMPLATE.format(system_context=system_context, prompt=prompt)
+        turn_count = 1
+        if session_id is not None:
+            turn_count = await self._increment_and_get_session_turn_count(session_id, request_kwargs or {})
 
-        # Forward the original request's metadata so the classifier call's spend is
-        # attributed to the calling key/team instead of being dropped. Excludes the
-        # parent request's budget reservation, which the routed completion (not this
-        # internal classifier call) is responsible for reconciling.
+        include_system_prompt = (
+            turn_count <= self.config.classifier_context_system_prompt_cache_ttl_turns
+            if session_id is not None
+            else True
+        )
+
+        system_rubric = _CLASSIFICATION_PROMPT_TEMPLATE
+
+        prior_turns = (
+            _extract_prior_user_turns(
+                messages,
+                window_size=self.config.classifier_context_window_size,
+                per_turn_chars=self.config.classifier_context_per_turn_chars,
+            )
+            if messages and self.config.classifier_context_window_size > 0
+            else ()
+        )
+
+        user_payload = self._build_classifier_user_payload(
+            prompt=prompt,
+            system_prompt=system_prompt if include_system_prompt else None,
+            prior_turns=prior_turns,
+            turn_count=turn_count,
+            messages=messages,
+        )
+
         request_metadata = (request_kwargs or {}).get("litellm_metadata") or (request_kwargs or {}).get("metadata")
         metadata = _classifier_call_metadata(request_metadata)
         turn_off_message_logging = _effective_turn_off_message_logging(request_kwargs)
 
+        messages_for_call = [
+            {"role": "system", "content": system_rubric},
+            {"role": "user", "content": user_payload},
+        ]
+
         proxy_server_request = {
             "body": {
                 "model": llm_config.model,
-                "messages": [{"role": "user", "content": classification_prompt}],
+                "messages": messages_for_call,
                 "response_format": type_to_response_format_param(TierClassification),
             }
         }
 
         response: ModelResponse = await self.litellm_router_instance.acompletion(
             model=llm_config.model,
-            messages=[{"role": "user", "content": classification_prompt}],
+            messages=messages_for_call,
             response_format=TierClassification,
             timeout=llm_config.timeout_ms / 1000,
             metadata=metadata,
@@ -465,6 +599,42 @@ class ComplexityRouter(CustomLogger):
             raise ValueError("LLM classifier returned empty content")
         result = TierClassification.model_validate_json(content)
         return ComplexityTier[result.tier]
+
+    @staticmethod
+    def _build_classifier_user_payload(
+        prompt: str,
+        system_prompt: str | None = None,
+        prior_turns: Sequence[str] | None = None,
+        turn_count: int = 1,
+        messages: Sequence[Mapping[str, object]] | None = None,
+    ) -> str:
+        """
+        Build the user message payload for the LLM classifier.
+
+        Structures prior-turn context, trajectory signals, and the current ask in a way
+        that is easy for the classifier to parse and reason about.
+        """
+        cumulative_tokens = sum(
+            len(content) // 4 for msg in (messages or ()) if isinstance(content := msg.get("content") or "", str)
+        )
+
+        prior_turns_block = (
+            (
+                "\nRecent conversation (context only, do not classify these):",
+                *(f"[{i}] {turn}" for i, turn in enumerate(prior_turns, start=1)),
+            )
+            if prior_turns
+            else ()
+        )
+
+        parts = (
+            (f"Context: {system_prompt}\n",) if system_prompt else (),
+            prior_turns_block,
+            (f"\nSession: turn {turn_count}, ~{cumulative_tokens} tokens so far",),
+            (f"\nClassify this message:\n{prompt}",),
+        )
+
+        return "\n".join(part for group in parts for part in group)
 
     def get_model_for_tier(self, tier: ComplexityTier) -> str:
         """
@@ -907,27 +1077,13 @@ class ComplexityRouter(CustomLogger):
     def _extract_user_message_and_system_prompt(
         messages: list[dict[str, Any]],
     ) -> tuple[str | None, str | None]:
-        """Extract the last user message text and last system prompt from messages."""
-        user_message: str | None = None
-        system_prompt: str | None = None
+        """
+        Deprecated: use _extract_current_ask_and_system_prompt instead.
 
-        for msg in reversed(messages):
-            role = msg.get("role", "")
-            content = msg.get("content") or ""
-            if isinstance(content, list):
-                text_parts = [
-                    part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") == "text"
-                ]
-                content = " ".join(text_parts).strip()
-            if isinstance(content, str) and content:
-                if role == "user" and user_message is None:
-                    user_message = content
-                elif role == "system" and system_prompt is None:
-                    system_prompt = content
-            if user_message is not None and system_prompt is not None:
-                break
-
-        return user_message, system_prompt
+        Kept for backward compatibility. Returns the last real user ask (skipping tool results
+        and harness messages) and the last system prompt.
+        """
+        return _extract_current_ask_and_system_prompt(messages)
 
     @staticmethod
     def _iter_metadata_dicts(request_kwargs: dict) -> list[dict]:
@@ -966,6 +1122,27 @@ class ComplexityRouter(CustomLogger):
         # (e.g. direct Router usage without the proxy layer).
         caller_scope = self._get_user_api_key_hash_from_request_kwargs(request_kwargs) or "unscoped"
         return f"complexity_router_session_affinity:v1:{self.model_name}:{caller_scope}:{session_id}"
+
+    def _get_session_turn_count_cache_key(self, session_id: str, request_kwargs: Mapping[str, Any]) -> str:
+        """Cache key for tracking the turn count within a session for classifier context decisions."""
+        caller_scope = self._get_user_api_key_hash_from_request_kwargs(dict(request_kwargs)) or "unscoped"
+        return f"complexity_router_session_turn_count:v1:{self.model_name}:{caller_scope}:{session_id}"
+
+    async def _increment_and_get_session_turn_count(
+        self, session_id: str | None, request_kwargs: Mapping[str, Any]
+    ) -> int:
+        """Increment session turn count in cache and return the new value (1-indexed: first call returns 1)."""
+        if session_id is None:
+            return 1
+        cache_key = self._get_session_turn_count_cache_key(session_id, request_kwargs)
+        current_count = await self.litellm_router_instance.cache.async_get_cache(key=cache_key)
+        new_count = (int(current_count) if current_count is not None else 0) + 1
+        await self.litellm_router_instance.cache.async_set_cache(
+            key=cache_key,
+            value=new_count,
+            ttl=self.config.session_affinity_ttl_seconds,
+        )
+        return new_count
 
     async def async_pre_routing_hook(
         self,
@@ -1006,9 +1183,7 @@ class ComplexityRouter(CustomLogger):
                 if self.escalation_keywords:
                     resolved_messages = self._resolve_messages(messages, request_kwargs)
                     user_message = (
-                        self._extract_user_message_and_system_prompt(resolved_messages)[0]
-                        if resolved_messages
-                        else None
+                        _extract_current_ask_and_system_prompt(resolved_messages)[0] if resolved_messages else None
                     )
                     if user_message is not None and self._escalation_triggered(user_message):
                         routed_model = self._escalated_pin(pinned_model)
@@ -1087,7 +1262,8 @@ class ComplexityRouter(CustomLogger):
         # Determine whether the original request used messages directly
         has_original_messages = messages is not None and len(messages) > 0
 
-        user_message, system_prompt = self._extract_user_message_and_system_prompt(resolved_messages)
+        user_message, system_prompt = _extract_current_ask_and_system_prompt(resolved_messages)
+        session_id = self._get_session_id_from_request_kwargs(request_kwargs)
 
         if user_message is None:
             verbose_router_logger.debug("ComplexityRouter: No user message found, routing to default model")
@@ -1125,7 +1301,9 @@ class ComplexityRouter(CustomLogger):
                 messages=messages if has_original_messages else None,
             )
 
-        tier, score, signals = await self.aclassify(user_message, system_prompt, request_kwargs)
+        tier, score, signals = await self.aclassify(
+            user_message, system_prompt, request_kwargs, resolved_messages, session_id
+        )
         if escalate:
             tier = self._escalate_tier(tier)
             signals = [*signals, "escalation"]

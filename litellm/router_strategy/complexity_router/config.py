@@ -31,6 +31,10 @@ TIER_SEVERITY_ORDER: tuple[ComplexityTier, ...] = (
 
 DEFAULT_TIER_DISTANCE_PENALTY: float = 0.5
 
+DEFAULT_CLASSIFIER_CONTEXT_WINDOW_SIZE: int = 3
+DEFAULT_CLASSIFIER_CONTEXT_PER_TURN_CHARS: int = 200
+DEFAULT_CLASSIFIER_CONTEXT_SYSTEM_PROMPT_CACHE_TTL_TURNS: int = 1
+
 
 class KeywordTierRule(BaseModel):
     """A deterministic override: if any keyword matches, route to this tier."""
@@ -327,6 +331,34 @@ class ComplexityRouterConfig(BaseModel):
     classifier_llm_config: ClassifierLLMConfig | None = Field(
         default=None,
         description="Configuration for the LLM classifier; required when classifier_type is 'llm'",
+    )
+
+    classifier_context_window_size: int = Field(
+        default=DEFAULT_CLASSIFIER_CONTEXT_WINDOW_SIZE,
+        ge=0,
+        description=(
+            "Number of prior user turns (excluding tool-result and system-reminder turns) "
+            "to include as context in the LLM classifier prompt. Set to 0 to disable prior-turn context. "
+            "Only applies when classifier_type is 'llm'."
+        ),
+    )
+    classifier_context_per_turn_chars: int = Field(
+        default=DEFAULT_CLASSIFIER_CONTEXT_PER_TURN_CHARS,
+        gt=0,
+        description=(
+            "Maximum character length for each prior turn's text in the classifier context window. "
+            "Turns exceeding this are truncated. Only applies when classifier_type is 'llm'."
+        ),
+    )
+    classifier_context_system_prompt_cache_ttl_turns: int = Field(
+        default=DEFAULT_CLASSIFIER_CONTEXT_SYSTEM_PROMPT_CACHE_TTL_TURNS,
+        ge=0,
+        description=(
+            "Number of turns within a session to include the full caller system prompt in the classifier call. "
+            "After this many turns, omit it (assume it is constant per session) to save tokens and improve caching. "
+            "Set to 0 to always omit; set to a large number (e.g. 999) to always include. "
+            "Only applies when classifier_type is 'llm'."
+        ),
     )
 
     adaptive: bool = Field(
