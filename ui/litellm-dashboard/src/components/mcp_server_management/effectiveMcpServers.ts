@@ -18,6 +18,10 @@ export interface EffectiveMcpServer {
   // Other keys in the map that name this same server. The backend unions every key's list, so a
   // write that touched only `permissionKey` would leave these still granting.
   readonly supersededKeys: readonly string[];
+  // Keys naming this server that name another server too, which happens when two servers share a
+  // name or alias. They are kept rather than collapsed, so their tools cannot be revoked here; the
+  // editor has to say so rather than let an edit look like it narrowed the grant.
+  readonly ambiguousKeys: readonly string[];
   // What this level currently allows on the server: the union across every equivalent key, which
   // is what the backend enforces. `undefined` means no entry at all, so no restriction from here.
   readonly allowedTools: readonly string[] | undefined;
@@ -106,10 +110,12 @@ export const resolveEffectiveMcpServers = ({
   const entry = (server: MCPServer, source: McpGrantSource): EffectiveMcpServer => {
     const keys = mcpToolPermissionKeysFor(server, toolPermissions);
     const permissionKey = keys[0] ?? server.server_id;
+    const editable = keys.filter((key) => key !== permissionKey);
     return {
       server,
       permissionKey,
-      supersededKeys: keys.filter((key) => key !== permissionKey && namesOneServerOnly(key)),
+      supersededKeys: editable.filter((key) => namesOneServerOnly(key)),
+      ambiguousKeys: editable.filter((key) => !namesOneServerOnly(key)),
       allowedTools: mcpAllowedToolsFor(server, toolPermissions),
       source,
     };

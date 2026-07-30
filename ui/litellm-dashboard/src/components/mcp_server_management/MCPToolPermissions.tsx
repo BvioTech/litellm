@@ -223,6 +223,11 @@ const MCPToolPermissions: React.FC<MCPToolPermissionsProps> = ({
                   )}
                 </div>
                 {server.description && <Text className="text-sm text-gray-500">{server.description}</Text>}
+                {entry.ambiguousKeys.length > 0 && (
+                  <Text className="text-sm text-amber-700 mt-1">
+                    {`Also granted by ${entry.ambiguousKeys.map((key) => `"${key}"`).join(", ")}, which names another server too. Those tools stay allowed here until the servers no longer share that name`}
+                  </Text>
+                )}
               </div>
               <div className="flex items-center gap-3">
                 {!disabled && tools.length > 0 && (

@@ -75,6 +75,7 @@ describe("resolveEffectiveMcpServers", () => {
         server: grouped,
         permissionKey: "srv-group",
         supersededKeys: [],
+        ambiguousKeys: [],
         allowedTools: undefined,
         source: { kind: "accessGroup", name: "prod" },
       },
@@ -112,6 +113,7 @@ describe("resolveEffectiveMcpServers", () => {
         server: inToolset,
         permissionKey: "srv-toolset",
         supersededKeys: [],
+        ambiguousKeys: [],
         allowedTools: undefined,
         source: { kind: "toolset", name: "Support" },
       },
@@ -141,6 +143,7 @@ describe("resolveEffectiveMcpServers", () => {
         server: grouped,
         permissionKey: "srv-group",
         supersededKeys: [],
+        ambiguousKeys: [],
         allowedTools: ["list_issues"],
         source: { kind: "toolPermission" },
       },
@@ -161,6 +164,7 @@ describe("resolveEffectiveMcpServers", () => {
         server: grouped,
         permissionKey: "srv-group",
         supersededKeys: [],
+        ambiguousKeys: [],
         allowedTools: ["list_issues"],
         source: { kind: "direct" },
       },
@@ -182,6 +186,7 @@ describe("resolveEffectiveMcpServers", () => {
         server: named,
         permissionKey: "github_mcp",
         supersededKeys: [],
+        ambiguousKeys: [],
         allowedTools: ["list_issues"],
         source: { kind: "direct" },
       },
@@ -224,6 +229,7 @@ describe("equivalent permission keys for one server", () => {
     expect(resolved).toHaveLength(1);
     expect(resolved[0].permissionKey).toBe("uuid-1");
     expect(resolved[0].supersededKeys).toEqual(["github_mcp", "GitHub"]);
+    expect(resolved[0].ambiguousKeys).toEqual([]);
     expect(resolved[0].allowedTools).toEqual(["list_issues", "create_issue", "delete_issue"]);
   });
 
@@ -252,6 +258,7 @@ describe("equivalent permission keys for one server", () => {
     });
 
     expect(entry.supersededKeys).toEqual([]);
+    expect(entry.ambiguousKeys).toEqual([]);
     expect(applyToolPermissionWrite({ toolPermissions, entry, allowed: [] })).toEqual({
       github_mcp: [],
       "uuid-2": ["ping"],
@@ -271,6 +278,7 @@ describe("equivalent permission keys for one server", () => {
     });
 
     expect(entry.supersededKeys).toEqual([]);
+    expect(entry.ambiguousKeys).toEqual(["shared"]);
     expect(applyToolPermissionWrite({ toolPermissions, entry, allowed: ["list_issues"] })).toEqual({
       "uuid-1": ["list_issues"],
       shared: ["create_issue"],

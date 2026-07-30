@@ -494,6 +494,33 @@ describe("MCPToolPermissions", () => {
       expect(written[namedServer.server_id]).toContain("create_issue");
     });
 
+    it("says on the card when a key names another server too, since its tools cannot be revoked here", async () => {
+      const twin = { server_id: "1f4bd6c1-0000-4000-8000-000000000002", server_name: "github_mcp", alias: "Twin" };
+      vi.mocked(networking.fetchMCPServers).mockResolvedValue([namedServer, twin]);
+
+      renderWithProviders(
+        <MCPToolPermissions
+          accessToken={mockAccessToken}
+          selectedServers={[namedServer.server_id]}
+          toolPermissions={{ [namedServer.server_id]: ["list_issues"], github_mcp: ["create_issue"] }}
+          onChange={vi.fn()}
+        />,
+      );
+
+      expect(
+        await screen.findByText(
+          'Also granted by "github_mcp", which names another server too. Those tools stay allowed here until the servers no longer share that name',
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it("says nothing about shared names when every key names one server", async () => {
+      renderWithBothKeys(vi.fn());
+
+      expect(await screen.findByText("github_mcp")).toBeInTheDocument();
+      expect(screen.queryByText(/names another server too/)).not.toBeInTheDocument();
+    });
+
     it("badges the server once, by its strongest grant, when a key and a group both name it", async () => {
       renderWithProviders(
         <MCPToolPermissions
