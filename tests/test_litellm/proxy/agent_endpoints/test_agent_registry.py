@@ -112,3 +112,45 @@ async def test_update_agent_in_db_preserves_explicit_static_headers_and_extra_he
 
     assert update_data["static_headers"] == '{"Authorization": "Bearer xyz"}'
     assert update_data["extra_headers"] == ["X-Custom-Header"]
+
+
+def test_load_agents_from_db_and_config_retains_previously_loaded_config_agents():
+    """
+    A DB reload calls this without an explicit agent_config. It resets the
+    registry, so it must fall back to the agents remembered from config.yaml
+    instead of dropping them.
+    """
+    registry = AgentRegistry()
+    registry.load_agents_from_config(
+        [
+            {
+                "agent_name": "config-agent",
+                "agent_card_params": _sample_agent_card_params(),
+            }
+        ]
+    )
+
+    registry.load_agents_from_db_and_config(
+        db_agents=[
+            {
+                "agent_id": "db-id",
+                "agent_name": "db-agent",
+                "agent_card_params": _sample_agent_card_params(),
+            }
+        ]
+    )
+
+    assert sorted(agent.agent_name for agent in registry.get_agent_list()) == [
+        "config-agent",
+        "db-agent",
+    ]
+
+
+def test_load_agents_from_db_and_config_skips_incomplete_config_entries():
+    """Config entries missing agent_card_params are skipped, not registered half-built."""
+    registry = AgentRegistry()
+    registry.load_agents_from_config([{"agent_name": "no-card"}])
+
+    registry.load_agents_from_db_and_config(db_agents=None)
+
+    assert registry.get_agent_list() == []

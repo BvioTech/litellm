@@ -2354,3 +2354,85 @@ async def test_ProxyConfig_load_config_redacts_secret_litellm_setting_keeps_plai
     assert "num_retries=7" in rendered, (
         f"non-secret num_retries value was over-redacted; expected it visible in {rendered!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# ProxyConfig agents from config.yaml
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def clean_agent_registry():
+    from litellm.proxy.agent_endpoints.agent_registry import global_agent_registry
+
+    original_agents = list(global_agent_registry.agent_list)
+    original_config_agents = getattr(global_agent_registry, "config_agents", ())
+    global_agent_registry.agent_list = []
+    global_agent_registry.config_agents = ()
+    try:
+        yield global_agent_registry
+    finally:
+        global_agent_registry.agent_list = original_agents
+        global_agent_registry.config_agents = original_config_agents
+
+
+def _config_agent(agent_name: str) -> Dict[str, Any]:
+    return {
+        "agent_name": agent_name,
+        "agent_card_params": {
+            "name": "Config Agent",
+            "url": "http://localhost:10001",
+            "protocolVersion": "1.0",
+        },
+    }
+
+
+class _FakeAgentRow:
+    """Stand-in for a prisma agent record: supports dict() and .object_permission."""
+
+    def __init__(self, agent_id: str, agent_name: str) -> None:
+        self.agent_id = agent_id
+        self.agent_name = agent_name
+        self.object_permission = None
+        self.spend = 0.0
+
+    def __iter__(self):
+        return iter(
+            {
+                "agent_id": self.agent_id,
+                "agent_name": self.agent_name,
+                "agent_card_params": {"name": self.agent_name, "url": "http://db-agent"},
+                "litellm_params": {},
+            }.items()
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("config_key", ["agents", "agent_list"])
+async def test_ProxyConfig__init_non_llm_configs_registers_agents_from_config(clean_agent_registry, config_key):
+    """The documented ``agents:`` key must register agents, as must the legacy ``agent_list:``."""
+    await ProxyConfig()._init_non_llm_configs(
+        config={config_key: [_config_agent("config-agent")]},
+        config_file_path=None,
+    )
+
+    assert [agent.agent_name for agent in clean_agent_registry.get_agent_list()] == ["config-agent"]
+
+
+@pytest.mark.asyncio
+async def test_ProxyConfig__init_agents_in_db_keeps_config_defined_agents(clean_agent_registry):
+    """A DB reload rebuilds the registry; config-defined agents must survive it alongside DB rows."""
+    await ProxyConfig()._init_non_llm_configs(
+        config={"agents": [_config_agent("config-agent")]},
+        config_file_path=None,
+    )
+
+    prisma_client = MagicMock()
+    prisma_client.db.litellm_agentstable.find_many = AsyncMock(return_value=[_FakeAgentRow("db-id", "db-agent")])
+
+    await ProxyConfig()._init_agents_in_db(prisma_client=prisma_client)
+
+    assert sorted(agent.agent_name for agent in clean_agent_registry.get_agent_list()) == [
+        "config-agent",
+        "db-agent",
+    ]

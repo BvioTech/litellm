@@ -89,6 +89,7 @@ def agents_table(prisma_client: PrismaClient) -> AgentTableClient:
 class AgentRegistry:
     def __init__(self):
         self.agent_list: list[AgentResponse] = []
+        self.config_agents: tuple[AgentConfig, ...] = ()
 
     def reset_agent_list(self):
         self.agent_list = []
@@ -120,6 +121,8 @@ class AgentRegistry:
         if agent_config is None:
             return None
 
+        self.config_agents = tuple(agent_config)
+
         for agent_config_item in agent_config:
             if not isinstance(agent_config_item, dict):
                 raise ValueError("agent_config must be a list of dictionaries")
@@ -139,19 +142,16 @@ class AgentRegistry:
         agent_config: Sequence[AgentConfig] | None = None,
         db_agents: list[dict[str, Any]] | None = None,
     ):
+        """
+        Rebuild the registry from the DB rows plus the agents declared in config.yaml.
+
+        ``agent_config`` defaults to the agents remembered by the last
+        ``load_agents_from_config`` call, so a periodic DB reload does not drop
+        config-defined agents.
+        """
         self.reset_agent_list()
 
-        if agent_config:
-            for agent_config_item in agent_config:
-                if not isinstance(agent_config_item, dict):
-                    raise ValueError("agent_config must be a list of dictionaries")
-
-                self.register_agent(
-                    agent_config=AgentResponse(
-                        agent_id=self._create_agent_id(agent_config_item),
-                        **agent_config_item,
-                    )
-                )  # type: ignore
+        self.load_agents_from_config(agent_config if agent_config is not None else self.config_agents)
 
         if db_agents:
             for db_agent in db_agents:
