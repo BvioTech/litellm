@@ -190,9 +190,8 @@ const mockUseCurrentUser = vi.mocked(useCurrentUser);
 const mockUseMCPServers = vi.mocked(useMCPServers);
 const mockUseMCPToolsets = vi.mocked(useMCPToolsets);
 
-const mcpQueryResult = <T,>(data: T, isError = false) =>
-  ({ data, isError, isLoading: false }) as unknown as ReturnType<typeof useMCPServers> &
-    ReturnType<typeof useMCPToolsets>;
+const mcpQueryResult = <T,>(data: T, isError = false, isLoading = false) =>
+  ({ data, isError, isLoading }) as unknown as ReturnType<typeof useMCPServers> & ReturnType<typeof useMCPToolsets>;
 
 const createMockTeamData = (overrides = {}) => ({
   team_id: "123",
@@ -1241,10 +1240,14 @@ describe("TeamInfoView", () => {
       },
     };
 
-    const renderTeam = async (user: ReturnType<typeof userEvent.setup>, serversFailed = false) => {
+    const renderTeam = async (
+      user: ReturnType<typeof userEvent.setup>,
+      { serversFailed = false, toolsetsLoading = false } = {},
+    ) => {
       mockUseMCPServers.mockReturnValue(
         mcpQueryResult(serversFailed ? [] : [DIRECT_SERVER, GROUP_SERVER], serversFailed),
       );
+      mockUseMCPToolsets.mockReturnValue(mcpQueryResult([], false, toolsetsLoading));
       vi.mocked(networking.teamInfoCall).mockResolvedValue(
         createMockTeamData({ models: ["gpt-4"], object_permission: objectPermission }),
       );
@@ -1315,7 +1318,21 @@ describe("TeamInfoView", () => {
 
     it("keeps every allowlist unchanged when the server list cannot be resolved", async () => {
       const user = userEvent.setup({ delay: null });
-      await renderTeam(user, true);
+      await renderTeam(user, { serversFailed: true });
+
+      await user.click(screen.getByRole("button", { name: "remove all access groups" }));
+      await user.click(screen.getByRole("button", { name: "deselect all mcp servers" }));
+      await save(user);
+
+      expect(savedToolPermissions()).toEqual({
+        "direct-server": ["create_issue"],
+        "group-server": ["list_issues"],
+      });
+    });
+
+    it("keeps every allowlist unchanged while the toolset list is still loading", async () => {
+      const user = userEvent.setup({ delay: null });
+      await renderTeam(user, { toolsetsLoading: true });
 
       await user.click(screen.getByRole("button", { name: "remove all access groups" }));
       await user.click(screen.getByRole("button", { name: "deselect all mcp servers" }));

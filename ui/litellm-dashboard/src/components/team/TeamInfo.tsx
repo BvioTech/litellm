@@ -245,7 +245,9 @@ const TeamInfoView: React.FC<TeamInfoProps> = ({
   const [copiedStates, setCopiedStates] = useState<Record<string, boolean>>({});
   const { data: guardrailsData, isLoading: isGuardrailsLoading } = useGuardrails();
   const { data: allMcpServers = [], isError: mcpServersFailed, isLoading: mcpServersLoading } = useMCPServers();
-  const { data: allMcpToolsets = [], isError: mcpToolsetsFailed } = useMCPToolsets();
+  const { data: allMcpToolsets = [], isError: mcpToolsetsFailed, isLoading: mcpToolsetsLoading } = useMCPToolsets();
+  const mcpServersUnavailable = mcpServersFailed || mcpServersLoading;
+  const mcpToolsetsUnavailable = mcpToolsetsFailed || mcpToolsetsLoading;
   const globalGuardrailNames = guardrailsData?.globalGuardrailNames ?? new Set<string>();
   const [policiesList, setPoliciesList] = useState<string[]>([]);
   const [policyGuardrails, setPolicyGuardrails] = useState<Record<string, string[]>>({});
@@ -624,7 +626,7 @@ const TeamInfoView: React.FC<TeamInfoProps> = ({
         toolsets: [],
       };
       const submittedToolPermissions: Record<string, string[]> = values.mcp_tool_permissions || {};
-      const mcpResolutionFailed = mcpServersFailed || mcpServersLoading || mcpToolsetsFailed;
+      const mcpResolutionFailed = mcpServersUnavailable || mcpToolsetsUnavailable;
       const effectiveMcpInput = {
         allServers: allMcpServers,
         selectedServers: servers || [],
