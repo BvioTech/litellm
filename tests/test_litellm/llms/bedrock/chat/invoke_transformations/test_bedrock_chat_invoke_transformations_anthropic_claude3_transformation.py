@@ -545,3 +545,45 @@ def test_output_format_removed_from_bedrock_invoke_request():
     assert (
         "output_format" not in result
     ), f"output_format should be removed for Bedrock Invoke, got keys: {result.keys()}"
+
+
+def test_response_format_preserves_opus_5_adaptive_thinking():
+    config = AmazonAnthropicClaudeConfig()
+    model = "global.anthropic.claude-opus-5"
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "answer",
+            "schema": {
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+            },
+        },
+    }
+
+    optional_params = config.map_openai_params(
+        non_default_params={
+            "thinking": {"type": "enabled", "budget_tokens": 4096},
+            "response_format": response_format,
+        },
+        optional_params={},
+        model=model,
+        drop_params=False,
+    )
+
+    result = config.transform_request(
+        model=model,
+        messages=[{"role": "user", "content": "test"}],
+        optional_params=optional_params,
+        litellm_params={},
+        headers={},
+    )
+
+    assert result["thinking"] == {"type": "adaptive"}
+    assert result["output_config"] == {"effort": "high"}
+    assert result["tools"] == [
+        {
+            "name": "json_tool_call",
+            "input_schema": response_format["json_schema"]["schema"],
+        }
+    ]

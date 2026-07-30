@@ -98,8 +98,11 @@ class AmazonAnthropicClaudeConfig(AmazonInvokeConfig, AnthropicConfig):
             drop_params,
         )
 
-        # Restore original model name
-        model = original_model
+        AnthropicConfig._translate_legacy_thinking_for_adaptive_model(
+            model=original_model,
+            optional_params=optional_params,
+            custom_llm_provider="bedrock",
+        )
 
         return optional_params
 
@@ -222,6 +225,8 @@ class AmazonAnthropicClaudeConfig(AmazonInvokeConfig, AnthropicConfig):
                 output_format=output_config_format,
                 request_body=anthropic_request,
             )
+        thinking = anthropic_request.get("thinking")
+        uses_adaptive_thinking = isinstance(thinking, dict) and thinking.get("type") == "adaptive"
         if not (
             _supports_factory(
                 model=model,
@@ -229,6 +234,7 @@ class AmazonAnthropicClaudeConfig(AmazonInvokeConfig, AnthropicConfig):
                 key="supports_output_config",
             )
             or AnthropicConfig._model_supports_effort_param(model, "bedrock")
+            or uses_adaptive_thinking
         ):
             if anthropic_request.pop("output_config", None) is not None:
                 verbose_logger.warning(

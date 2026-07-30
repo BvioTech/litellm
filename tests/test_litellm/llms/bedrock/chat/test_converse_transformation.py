@@ -15,6 +15,7 @@ import litellm
 from litellm import ModelResponse, RateLimitError, completion
 from litellm.llms.bedrock.chat.converse_transformation import AmazonConverseConfig
 from litellm.types.llms.bedrock import ConverseTokenUsageBlock
+from litellm.utils import get_optional_params
 
 
 def test_transform_usage():
@@ -358,6 +359,72 @@ def test_legacy_thinking_maps_to_adaptive_thinking_for_converse():
 
     assert optional_params["thinking"] == {"type": "adaptive"}
     assert optional_params["output_config"] == {"effort": "low"}
+
+
+def test_opaque_application_profile_uses_base_model_for_legacy_thinking():
+    model = (
+        "arn:aws:bedrock:us-west-2:123456789012:"
+        "application-inference-profile/abcdef123456"
+    )
+    base_model = "global.anthropic.claude-opus-5"
+
+    optional_params = get_optional_params(
+        model=model,
+        custom_llm_provider="bedrock",
+        base_model=base_model,
+        max_tokens=32000,
+        thinking={"type": "enabled", "budget_tokens": 4096},
+    )
+
+    assert optional_params["thinking"] == {"type": "adaptive"}
+    assert optional_params["output_config"] == {"effort": "high"}
+    optional_params.pop("stream", None)
+
+    result = AmazonConverseConfig().transform_request(
+        model=model,
+        messages=[{"role": "user", "content": "hi"}],
+        optional_params=optional_params,
+        litellm_params={"base_model": base_model},
+        headers={},
+    )
+
+    assert result["additionalModelRequestFields"] == {
+        "thinking": {"type": "adaptive"},
+        "output_config": {"effort": "high"},
+    }
+
+
+def test_opaque_application_profile_keeps_legacy_thinking_for_older_model():
+    model = (
+        "arn:aws:bedrock:us-west-2:123456789012:"
+        "application-inference-profile/abcdef123456"
+    )
+    base_model = "global.anthropic.claude-opus-4-5-20251101-v1:0"
+    legacy_thinking = {"type": "enabled", "budget_tokens": 4096}
+
+    optional_params = get_optional_params(
+        model=model,
+        custom_llm_provider="bedrock",
+        base_model=base_model,
+        max_tokens=32000,
+        thinking=legacy_thinking,
+    )
+
+    assert optional_params["thinking"] == legacy_thinking
+    assert "output_config" not in optional_params
+    optional_params.pop("stream", None)
+
+    result = AmazonConverseConfig().transform_request(
+        model=model,
+        messages=[{"role": "user", "content": "hi"}],
+        optional_params=optional_params,
+        litellm_params={"base_model": base_model},
+        headers={},
+    )
+
+    assert result["additionalModelRequestFields"] == {
+        "thinking": legacy_thinking,
+    }
 
 
 @pytest.mark.parametrize(

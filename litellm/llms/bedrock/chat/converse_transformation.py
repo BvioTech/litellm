@@ -1214,7 +1214,11 @@ class AmazonConverseConfig(BaseConfig):
         return {}
 
     def _prepare_request_params(
-        self, optional_params: dict, model: str, drop_params: bool = False
+        self,
+        optional_params: dict,
+        model: str,
+        drop_params: bool = False,
+        output_config_model: Optional[str] = None,
     ) -> Tuple[dict, dict, dict, Optional[OutputConfigBlock]]:
         """Prepare and separate request parameters."""
         # Consume the internal ``_output_config_normalized`` marker set by
@@ -1305,22 +1309,28 @@ class AmazonConverseConfig(BaseConfig):
         # This filters: Exception objects, callable objects (functions), Logging objects, etc.
         additional_request_params = filter_exceptions_from_params(additional_request_params)
 
-        if anthropic_output_config is not None and isinstance(anthropic_output_config, dict):
-            if base_model.startswith("anthropic"):
-                if litellm.drop_params is True and not AnthropicConfig._model_supports_effort_param(model, "bedrock"):
+        if isinstance(anthropic_output_config, dict):
+            # Keep routing and other model-specific transforms on the real model;
+            # only the Anthropic effort gate needs the configured base model.
+            effort_model = output_config_model or model
+            output_config_base_model = BedrockModelInfo.get_base_model(effort_model)
+            if output_config_base_model.startswith("anthropic"):
+                if litellm.drop_params is True and not AnthropicConfig._model_supports_effort_param(
+                    effort_model, "bedrock"
+                ):
                     litellm.verbose_logger.warning(
                         DROP_UNSUPPORTED_OUTPUT_CONFIG_WARNING,
-                        model,
+                        effort_model,
                     )
                 else:
                     if not anthropic_output_config_already_normalized:
                         normalize_bedrock_opus_output_config_effort(
-                            model=model,
+                            model=effort_model,
                             output_config=anthropic_output_config,
                         )
                     effort = anthropic_output_config.get("effort")
                     if effort is not None:
-                        self._validate_anthropic_adaptive_effort(model=model, effort=effort)
+                        self._validate_anthropic_adaptive_effort(model=effort_model, effort=effort)
                     additional_request_params["output_config"] = anthropic_output_config
 
         return (
@@ -1511,6 +1521,7 @@ class AmazonConverseConfig(BaseConfig):
         messages: Optional[List[AllMessageValues]] = None,
         headers: Optional[dict] = None,
         drop_params: bool = False,
+        output_config_model: Optional[str] = None,
     ) -> CommonRequestObject:
         ## VALIDATE REQUEST
         """
@@ -1551,7 +1562,12 @@ class AmazonConverseConfig(BaseConfig):
             additional_request_params,
             request_metadata,
             output_config,
-        ) = self._prepare_request_params(optional_params, model, drop_params)
+        ) = self._prepare_request_params(
+            optional_params=optional_params,
+            model=model,
+            drop_params=drop_params,
+            output_config_model=output_config_model,
+        )
 
         original_tools = inference_params.pop("tools", [])
 
@@ -1626,6 +1642,7 @@ class AmazonConverseConfig(BaseConfig):
             messages=messages,
             headers=headers,
             drop_params=litellm_params.get("drop_params") is True,
+            output_config_model=litellm_params.get("base_model"),
         )
 
         bedrock_messages = await BedrockConverseMessagesProcessor._bedrock_converse_messages_pt_async(
@@ -1678,6 +1695,7 @@ class AmazonConverseConfig(BaseConfig):
             messages=messages,
             headers=headers,
             drop_params=litellm_params.get("drop_params") is True,
+            output_config_model=litellm_params.get("base_model"),
         )
 
         ## TRANSFORMATION ##
