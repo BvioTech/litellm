@@ -494,25 +494,35 @@ describe("MCPToolPermissions", () => {
       expect(written[namedServer.server_id]).toContain("create_issue");
     });
 
-    it("says on the card when a key names another server too, since its tools cannot be revoked here", async () => {
-      const twin = { server_id: "1f4bd6c1-0000-4000-8000-000000000002", server_name: "github_mcp", alias: "Twin" };
-      vi.mocked(networking.fetchMCPServers).mockResolvedValue([namedServer, twin]);
+    // Both catalog orders, because a name resolves to two servers here and a first-match
+    // implementation is only wrong in one of them.
+    it.each([
+      { label: "edited server first", editedFirst: true },
+      { label: "twin first", editedFirst: false },
+    ])(
+      "says on the card when a key names another server too, since its tools cannot be revoked here ($label)",
+      async ({ editedFirst }) => {
+        const twin = { server_id: "1f4bd6c1-0000-4000-8000-000000000002", server_name: "github_mcp", alias: "Twin" };
+        vi.mocked(networking.fetchMCPServers).mockResolvedValue(
+          editedFirst ? [namedServer, twin] : [twin, namedServer],
+        );
 
-      renderWithProviders(
-        <MCPToolPermissions
-          accessToken={mockAccessToken}
-          selectedServers={[namedServer.server_id]}
-          toolPermissions={{ [namedServer.server_id]: ["list_issues"], github_mcp: ["create_issue"] }}
-          onChange={vi.fn()}
-        />,
-      );
+        renderWithProviders(
+          <MCPToolPermissions
+            accessToken={mockAccessToken}
+            selectedServers={[namedServer.server_id]}
+            toolPermissions={{ [namedServer.server_id]: ["list_issues"], github_mcp: ["create_issue"] }}
+            onChange={vi.fn()}
+          />,
+        );
 
-      expect(
-        await screen.findByText(
-          'Also granted by "github_mcp", which names another server too. Those tools stay allowed here until the servers no longer share that name',
-        ),
-      ).toBeInTheDocument();
-    });
+        expect(
+          await screen.findByText(
+            'Also granted by "github_mcp", which names another server too. Those tools stay allowed here until the servers no longer share that name',
+          ),
+        ).toBeInTheDocument();
+      },
+    );
 
     it("says nothing about shared names when every key names one server", async () => {
       renderWithBothKeys(vi.fn());

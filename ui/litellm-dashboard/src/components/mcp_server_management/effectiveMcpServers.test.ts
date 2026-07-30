@@ -49,8 +49,13 @@ describe("mcpToolPermissionKeyFor", () => {
     expect(mcpToolPermissionKeyFor(target, { github_mcp: ["list_issues"] })).toBe("github_mcp");
   });
 
-  it("prefers the id key when both an id and a name key exist", () => {
-    expect(mcpToolPermissionKeyFor(target, { github_mcp: ["list_issues"], "uuid-1": ["list_prs"] })).toBe("uuid-1");
+  // The map is a second collection of non-unique identifiers for one server, and this picks a
+  // winner from it, so both write orders have to hold or a map-order winner would slip through.
+  it.each([
+    { label: "id key first", toolPermissions: { "uuid-1": ["list_prs"], github_mcp: ["list_issues"] } },
+    { label: "name key first", toolPermissions: { github_mcp: ["list_issues"], "uuid-1": ["list_prs"] } },
+  ])("prefers the id key when both an id and a name key exist ($label)", ({ toolPermissions }) => {
+    expect(mcpToolPermissionKeyFor(target, toolPermissions)).toBe("uuid-1");
   });
 
   it("falls back to the server id when no entry exists yet", () => {
@@ -265,14 +270,19 @@ describe("equivalent permission keys for one server", () => {
     });
   });
 
-  it("never drops a key that also names a different server", () => {
+  // A name resolves to several servers, so a first-match implementation is right in one catalog
+  // order and wrong in the other; both orders have to hold for this to pin anything.
+  it.each([
+    { label: "edited server first", editedFirst: true },
+    { label: "other server first", editedFirst: false },
+  ])("never drops a key that also names a different server ($label)", ({ editedFirst }) => {
     const firstShared = server({ server_id: "uuid-1", server_name: "shared" });
     const secondShared = server({ server_id: "uuid-2", server_name: "shared" });
     const toolPermissions = { "uuid-1": ["list_issues"], shared: ["create_issue"] };
 
     const [entry] = resolveEffectiveMcpServers({
       ...emptyInput,
-      allServers: [firstShared, secondShared],
+      allServers: editedFirst ? [firstShared, secondShared] : [secondShared, firstShared],
       selectedServers: ["uuid-1"],
       toolPermissions,
     });
