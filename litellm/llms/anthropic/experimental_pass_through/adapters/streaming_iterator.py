@@ -300,6 +300,13 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
         # Synthesized compaction block from compact_20260112 polyfill (streaming).
         self.compaction_block = compaction_block
         self.iterations_usage = iterations_usage
+        # Diagnostics for the "empty turn" failure mode. Anthropic clients render
+        # only `text` and `tool_use` blocks, so a stream that ends carrying just a
+        # `thinking` block renders as a blank reply with no error anywhere. Track
+        # visibility here so a single warning at the final `message_delta` can name
+        # the upstream cause instead of leaving operators with only output_tokens.
+        self.emitted_visible_delta: bool = False
+        self.warned_no_visible_output: bool = False
         self.sent_compaction_block: bool = False
         # Per-phase flags so the compaction block's start/delta/stop events
         # are emitted (and the public state machine is advanced) in
@@ -383,6 +390,50 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
         augmented["context_management"] = ContextManagementResponse(applied_edits=list(self.applied_edits))
         return augmented
 
+    def _visible_delta_gate(self, processed_chunk: dict[str, Any]) -> bool:
+        """``_delta_has_content`` plus bookkeeping for the empty-turn warning.
+
+        Returns the same boolean. Additionally records whether a client-visible
+        delta (``text_delta`` / ``input_json_delta``) ever reached the client, so
+        ``_warn_if_no_visible_output`` can fire exactly once at stream end.
+        """
+        has_content: Final = self._delta_has_content(processed_chunk)
+        if has_content and not self.emitted_visible_delta:
+            delta = processed_chunk.get("delta")
+            if isinstance(delta, dict) and delta.get("type") in (
+                "text_delta",
+                "input_json_delta",
+            ):
+                self.emitted_visible_delta = True
+        return has_content
+
+    def _warn_if_no_visible_output(self, message_delta_chunk: MessageBlockDelta) -> None:
+        """Log once when a stream ends without any client-visible content block.
+
+        Bedrock Converse returns a reasoning signature with no plaintext, so a
+        turn whose answer was cut off (guardrail refusal) or never started
+        (reasoning consumed the whole budget) reaches the client as an empty
+        ``thinking`` block and nothing else. Without this line the only trace is a
+        non-zero ``output_tokens``, which cannot tell those two cases apart.
+        """
+        if self.warned_no_visible_output or self.emitted_visible_delta:
+            return
+        self.warned_no_visible_output = True
+
+        delta: Final = message_delta_chunk.get("delta")
+        stop_reason: Final = delta.get("stop_reason") if isinstance(delta, dict) else None
+        usage: Final = message_delta_chunk.get("usage")
+        output_tokens: Final = usage.get("output_tokens") if isinstance(usage, dict) else None
+        verbose_logger.warning(
+            "Anthropic Adapter - stream produced no client-visible content block; "
+            "the client will render an empty reply "
+            "(model=%s, stop_reason=%s, output_tokens=%s, last_block_type=%s)",
+            self.model,
+            stop_reason,
+            output_tokens,
+            self.current_content_block_type,
+        )
+
     def _augment_message_delta_usage(self, message_delta_chunk: MessageBlockDelta) -> MessageBlockDelta:
         """Attach polyfill compaction iteration usage to the final message_delta.
 
@@ -390,6 +441,7 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
         held-chunk flush path stays in sync with the merge path's guarantee
         when ``self.applied_edits`` is non-empty.
         """
+        self._warn_if_no_visible_output(message_delta_chunk)
         message_delta_chunk = self._ensure_context_management_attached(message_delta_chunk)
         if self.iterations_usage is None:
             return message_delta_chunk
@@ -617,13 +669,13 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
 
                     # 3. If the trigger chunk carries delta content, queue it
                     # so the first delta of the new block is not silently dropped.
-                    if self._delta_has_content(processed_chunk):
+                    if self._visible_delta_gate(processed_chunk):
                         self.chunk_queue.append(processed_chunk)
 
                     self.sent_content_block_finish = False
                     return self.chunk_queue.popleft()
 
-                if processed_chunk["type"] == "content_block_delta" and not self._delta_has_content(processed_chunk):
+                if processed_chunk["type"] == "content_block_delta" and not self._visible_delta_gate(processed_chunk):
                     # A tool_use block opens with empty arguments (Bedrock Converse's
                     # ``contentBlockStart``, OpenAI's ``arguments: ""``), so flush the
                     # block start queued above instead of waiting for the next upstream
@@ -843,14 +895,14 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
 
                         # 3. If the trigger chunk carries delta content, queue it
                         # so the first delta of the new block is not silently dropped.
-                        if self._delta_has_content(processed_chunk):
+                        if self._visible_delta_gate(processed_chunk):
                             self.chunk_queue.append(processed_chunk)
 
                         # Reset state for new block
                         self.sent_content_block_finish = False
                         return self.chunk_queue.popleft()
 
-                    if processed_chunk["type"] == "content_block_delta" and not self._delta_has_content(
+                    if processed_chunk["type"] == "content_block_delta" and not self._visible_delta_gate(
                         processed_chunk
                     ):
                         # See ``__next__``: flush the queued block start (issue #32004).
