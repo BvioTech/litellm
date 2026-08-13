@@ -916,6 +916,13 @@ class AmazonConverseConfig(BaseConfig):
                     isinstance(value, dict)
                     and value.get("type") == "adaptive"
                     and not AnthropicConfig._is_adaptive_thinking_model(model, "bedrock")
+                    # Application inference profile ARNs carry no model id, so the
+                    # probe above always says "not adaptive" and this branch would
+                    # downgrade an explicit adaptive request to a fixed 2048-token
+                    # budget while `output_config.effort` is still forwarded — a
+                    # contradictory pair. Forward as-is and let Bedrock reject it,
+                    # as _transform_request_helper already does for `output_config`.
+                    and not is_bedrock_application_inference_profile_arn(model)
                 ):
                     max_tokens = non_default_params.get("max_completion_tokens") or non_default_params.get("max_tokens")
                     legacy_thinking = AnthropicConfig._map_reasoning_effort(
