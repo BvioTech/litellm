@@ -1,20 +1,16 @@
 """
 Diagnostics for the "empty turn" failure mode on `/v1/messages`.
 
-Anthropic clients render only `text` and `tool_use` blocks. A stream that ends
-carrying just a `thinking` block therefore shows up as a blank reply with no
-error on either side — Bedrock Converse returns a reasoning signature with no
-plaintext, so a turn whose answer was blocked by a guardrail or never started
-(reasoning consumed the whole budget) is indistinguishable from success.
+Anthropic clients render only `text` and `tool_use` blocks, and Bedrock Converse
+returns reasoning as a signature with no plaintext. A turn blocked by a guardrail
+or one whose reasoning ate the whole budget therefore reaches the client as a
+blank reply with no error on either side. Two upstream-absent behaviours close
+that blind spot:
 
-Two upstream-absent behaviours are covered here:
-
-* `content_filter` maps to Anthropic's own `refusal` rather than falling into
-  the `end_turn` fallback, so clients can tell a blocked turn from a completed
-  one and stop retrying a request that can never succeed.
-* A stream with no client-visible content block logs exactly one warning
-  carrying the upstream `stop_reason` and `output_tokens`, which is the only way
-  to tell a refusal apart from reasoning that ate the whole budget.
+* `content_filter` maps to Anthropic's own `refusal` instead of falling into the
+  `end_turn` fallback, so a blocked turn is distinguishable from a completed one.
+* A stream with no client-visible content block logs exactly one warning carrying
+  the upstream `stop_reason` and `output_tokens`.
 """
 
 import asyncio
@@ -31,10 +27,10 @@ from litellm.llms.anthropic.experimental_pass_through.adapters.transformation im
 )
 from litellm.types.utils import Delta, ModelResponseStream, StreamingChoices, Usage
 
-_LOGGER_PATH = (
-    "litellm.llms.anthropic.experimental_pass_through.adapters"
-    ".streaming_iterator.verbose_logger"
-)
+_LOGGER_PATH = "litellm.llms.anthropic.experimental_pass_through.adapters.streaming_iterator.verbose_logger"
+# Both are echoed back by the warning, so the assertions can pin them.
+_MODEL = "claude-opus-5"
+_OUTPUT_TOKENS = 1427
 
 
 def _collect_async(wrapper: AnthropicStreamWrapper) -> str:
@@ -55,49 +51,25 @@ def _stream_of(*chunks: ModelResponseStream) -> "AsyncIterator[ModelResponseStre
     return _aiter()
 
 
-def _signature_only_chunk(signature: str = "sig-x") -> ModelResponseStream:
+def _signature_only_chunk() -> ModelResponseStream:
     """Bedrock Converse shape: reasoning arrives as a signature with no plaintext."""
-    return ModelResponseStream(
-        choices=[
-            StreamingChoices(
-                index=0,
-                delta=Delta(
-                    reasoning_content="",
-                    thinking_blocks=[
-                        {"type": "thinking", "thinking": "", "signature": signature}
-                    ],
-                ),
-                finish_reason=None,
-            )
-        ],
-    )
+    delta = Delta(reasoning_content="", thinking_blocks=[{"type": "thinking", "thinking": "", "signature": "sig-x"}])
+    return ModelResponseStream(choices=[StreamingChoices(index=0, delta=delta, finish_reason=None)])
 
 
-def _finish_chunk(
-    finish_reason: str = "stop", completion_tokens: int = 1427
-) -> ModelResponseStream:
+def _finish_chunk(finish_reason: str = "stop") -> ModelResponseStream:
     return ModelResponseStream(
         choices=[StreamingChoices(index=0, delta=Delta(), finish_reason=finish_reason)],
-        usage=Usage(
-            prompt_tokens=5,
-            completion_tokens=completion_tokens,
-            total_tokens=5 + completion_tokens,
-        ),
+        usage=Usage(prompt_tokens=5, completion_tokens=_OUTPUT_TOKENS, total_tokens=5 + _OUTPUT_TOKENS),
     )
 
 
 def _text_chunk(text: str) -> ModelResponseStream:
-    return ModelResponseStream(
-        choices=[StreamingChoices(index=0, delta=Delta(content=text), finish_reason=None)],
-    )
+    return ModelResponseStream(choices=[StreamingChoices(index=0, delta=Delta(content=text), finish_reason=None)])
 
 
 def _warnings_about_empty_turn(mock_logger) -> list:
-    return [
-        call
-        for call in mock_logger.warning.call_args_list
-        if "no client-visible" in str(call)
-    ]
+    return [call for call in mock_logger.warning.call_args_list if "no client-visible" in str(call)]
 
 
 @pytest.mark.parametrize(
@@ -117,20 +89,17 @@ def test_finish_reason_mapping(openai_finish_reason: str, expected: str) -> None
     from a turn the model finished naturally once the content is empty: clients
     retry a request that can never succeed (Claude Code injects
     "[no visible output]" and burns a second call), and provider health counters
-    record the refusal as a success.
+    record the refusal as a success. The surrounding cases pin the mappings our
+    new branch sits among, so inserting it cannot shadow them or the fallback.
     """
     adapter = LiteLLMAnthropicMessagesAdapter()
-    assert (
-        adapter._translate_openai_finish_reason_to_anthropic(openai_finish_reason)
-        == expected
-    )
+    assert adapter._translate_openai_finish_reason_to_anthropic(openai_finish_reason) == expected
 
 
 def test_no_visible_output_warns_with_upstream_context() -> None:
     """A stream ending with only a thinking block must leave a diagnosable trace."""
     wrapper = AnthropicStreamWrapper(
-        completion_stream=_stream_of(_signature_only_chunk(), _finish_chunk()),
-        model="claude-opus-5",
+        completion_stream=_stream_of(_signature_only_chunk(), _finish_chunk()), model=_MODEL
     )
     with patch(_LOGGER_PATH) as mock_logger:
         _collect_async(wrapper)
@@ -141,18 +110,14 @@ def test_no_visible_output_warns_with_upstream_context() -> None:
 
     # The upstream context must be carried so an operator can tell a refusal
     # apart from reasoning that consumed the whole budget.
-    args = warnings[0].args
-    assert "claude-opus-5" in args
-    assert 1427 in args
+    assert _MODEL in warnings[0].args
+    assert _OUTPUT_TOKENS in warnings[0].args
 
 
 def test_refusal_stream_warns_and_reports_refusal() -> None:
     """A guardrail-blocked turn surfaces both `refusal` and the warning."""
     wrapper = AnthropicStreamWrapper(
-        completion_stream=_stream_of(
-            _signature_only_chunk(), _finish_chunk(finish_reason="content_filter")
-        ),
-        model="claude-opus-5",
+        completion_stream=_stream_of(_signature_only_chunk(), _finish_chunk("content_filter")), model=_MODEL
     )
     with patch(_LOGGER_PATH) as mock_logger:
         sse = _collect_async(wrapper)
@@ -163,10 +128,7 @@ def test_refusal_stream_warns_and_reports_refusal() -> None:
 
 def test_visible_output_does_not_warn() -> None:
     """A normal stream carrying text must not emit the empty-turn warning."""
-    wrapper = AnthropicStreamWrapper(
-        completion_stream=_stream_of(_text_chunk("Hello."), _finish_chunk()),
-        model="claude-opus-5",
-    )
+    wrapper = AnthropicStreamWrapper(completion_stream=_stream_of(_text_chunk("Hello."), _finish_chunk()), model=_MODEL)
     with patch(_LOGGER_PATH) as mock_logger:
         sse = _collect_async(wrapper)
 
@@ -176,15 +138,22 @@ def test_visible_output_does_not_warn() -> None:
 
 
 def test_warning_fires_once_per_stream() -> None:
-    """Repeated `message_delta` flush paths must not multiply the warning."""
-    wrapper = AnthropicStreamWrapper(
-        completion_stream=_stream_of(
-            _signature_only_chunk(), _signature_only_chunk("sig-y"), _finish_chunk()
-        ),
-        model="claude-opus-5",
-    )
+    """The `warned_no_visible_output` guard is what keeps the warning single.
+
+    `_augment_message_delta_usage` is reachable from several flush paths
+    (hold-and-merge, end-of-stream drain, the `StopIteration` handler). Driving it
+    twice is the only way to reach the guard: a stream hitting two flush paths must
+    still log one line, or the warning stops being a per-request signal.
+    """
+    wrapper = AnthropicStreamWrapper(completion_stream=_stream_of(), model=_MODEL)
+    message_delta = {
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn"},
+        "usage": {"output_tokens": _OUTPUT_TOKENS},
+    }
     with patch(_LOGGER_PATH) as mock_logger:
-        _collect_async(wrapper)
+        wrapper._augment_message_delta_usage(message_delta)
+        wrapper._augment_message_delta_usage(message_delta)
 
     assert len(_warnings_about_empty_turn(mock_logger)) == 1
     assert wrapper.warned_no_visible_output is True

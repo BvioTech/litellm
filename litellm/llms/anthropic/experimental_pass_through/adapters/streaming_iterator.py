@@ -35,6 +35,8 @@ if TYPE_CHECKING:
 
 
 _STREAMING_DELTA_TYPES: Final = frozenset(get_args(StreamingContentBlockDeltaType))
+# The only delta types an Anthropic client renders; thinking/signature deltas are invisible.
+_VISIBLE_DELTA_TYPES: Final = frozenset({"text_delta", "input_json_delta"})
 
 
 class _UsageDeltaWithIterations(UsageDelta, total=False):
@@ -300,11 +302,7 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
         # Synthesized compaction block from compact_20260112 polyfill (streaming).
         self.compaction_block = compaction_block
         self.iterations_usage = iterations_usage
-        # Diagnostics for the "empty turn" failure mode. Anthropic clients render
-        # only `text` and `tool_use` blocks, so a stream that ends carrying just a
-        # `thinking` block renders as a blank reply with no error anywhere. Track
-        # visibility here so a single warning at the final `message_delta` can name
-        # the upstream cause instead of leaving operators with only output_tokens.
+        # Empty-turn diagnostics — see _warn_if_no_visible_output.
         self.emitted_visible_delta: bool = False
         self.warned_no_visible_output: bool = False
         self.sent_compaction_block: bool = False
@@ -393,44 +391,38 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
     def _visible_delta_gate(self, processed_chunk: dict[str, Any]) -> bool:
         """``_delta_has_content`` plus bookkeeping for the empty-turn warning.
 
-        Returns the same boolean. Additionally records whether a client-visible
-        delta (``text_delta`` / ``input_json_delta``) ever reached the client, so
-        ``_warn_if_no_visible_output`` can fire exactly once at stream end.
+        Returns that method's boolean unchanged. A True result guarantees
+        ``delta`` is a dict typed with a ``StreamingContentBlockDeltaType``, so
+        the visibility check needs no further guarding.
         """
         has_content: Final = self._delta_has_content(processed_chunk)
-        if has_content and not self.emitted_visible_delta:
-            delta = processed_chunk.get("delta")
-            if isinstance(delta, dict) and delta.get("type") in (
-                "text_delta",
-                "input_json_delta",
-            ):
-                self.emitted_visible_delta = True
+        if has_content and processed_chunk["delta"]["type"] in _VISIBLE_DELTA_TYPES:
+            self.emitted_visible_delta = True
         return has_content
 
     def _warn_if_no_visible_output(self, message_delta_chunk: MessageBlockDelta) -> None:
         """Log once when a stream ends without any client-visible content block.
 
-        Bedrock Converse returns a reasoning signature with no plaintext, so a
-        turn whose answer was cut off (guardrail refusal) or never started
-        (reasoning consumed the whole budget) reaches the client as an empty
-        ``thinking`` block and nothing else. Without this line the only trace is a
-        non-zero ``output_tokens``, which cannot tell those two cases apart.
+        Anthropic clients render only ``text`` and ``tool_use``, and Bedrock
+        Converse returns reasoning as a signature with no plaintext. So a turn
+        cut off by a guardrail, or one whose reasoning ate the whole budget,
+        reaches the client as a blank reply with no error on either side. This
+        line is the only trace that distinguishes the two — ``output_tokens``
+        alone cannot.
         """
         if self.warned_no_visible_output or self.emitted_visible_delta:
             return
         self.warned_no_visible_output = True
 
-        delta: Final = message_delta_chunk.get("delta")
-        stop_reason: Final = delta.get("stop_reason") if isinstance(delta, dict) else None
-        usage: Final = message_delta_chunk.get("usage")
-        output_tokens: Final = usage.get("output_tokens") if isinstance(usage, dict) else None
+        delta: Final = message_delta_chunk.get("delta") or {}
+        usage: Final = message_delta_chunk.get("usage") or {}
         verbose_logger.warning(
             "Anthropic Adapter - stream produced no client-visible content block; "
             "the client will render an empty reply "
             "(model=%s, stop_reason=%s, output_tokens=%s, last_block_type=%s)",
             self.model,
-            stop_reason,
-            output_tokens,
+            delta.get("stop_reason"),
+            usage.get("output_tokens"),
             self.current_content_block_type,
         )
 

@@ -150,7 +150,7 @@ pytest tests/test_litellm/llms/bedrock/chat/ \
 | `test_no_visible_output_warns_with_upstream_context` | 只有 thinking 块的流恰好一条 warning，且带上 model 与 output_tokens |
 | `test_refusal_stream_warns_and_reports_refusal` | 被拦的流同时产出 `refusal` 和 warning |
 | `test_visible_output_does_not_warn` | 正常有文本的流不打 warning |
-| `test_warning_fires_once_per_stream` | 多条 reasoning chunk 不会让 warning 重复 |
+| `test_warning_fires_once_per_stream` | 连续两次 `message_delta` flush 只出一条 warning（钉住 `warned_no_visible_output` 幂等位）|
 | `test_adaptive_thinking_forwarded_verbatim`（3 例） | 裸 ARN / 带 `bedrock/converse/` 前缀的 ARN / 真实模型 id 三者结果一致 |
 | `test_every_effort_tier_survives_the_arn`（5 例） | low / medium / high / xhigh / max 全部不被压成固定预算 |
 | `test_resolvable_non_adaptive_model_still_downgrades` | Claude 3.7 等可解析的老模型 id 仍照旧降级（豁免只针对判定不了的 ARN） |
@@ -175,20 +175,20 @@ pytest tests/test_litellm/llms/bedrock/chat/ \
 补丁面很小，跟随上游的成本已经压到最低：
 
 ```
-litellm/llms/anthropic/experimental_pass_through/adapters/transformation.py       +8
-litellm/llms/anthropic/experimental_pass_through/adapters/streaming_iterator.py  +60/-5
-litellm/types/llms/anthropic.py                                                  +4/-2
-litellm/llms/bedrock/chat/converse_transformation.py                             +11
-tests/.../adapters/test_empty_turn_diagnostics.py                                新文件
-tests/.../bedrock/chat/test_inference_profile_adaptive_thinking.py               新文件
+litellm/llms/anthropic/experimental_pass_through/adapters/transformation.py       +6
+litellm/llms/anthropic/experimental_pass_through/adapters/streaming_iterator.py  +48/-4
+litellm/types/llms/anthropic.py                                                  +3/-1
+litellm/llms/bedrock/chat/converse_transformation.py                             +6
+tests/.../adapters/test_empty_turn_diagnostics.py                                新文件 159 行
+tests/.../bedrock/chat/test_inference_profile_adaptive_thinking.py               新文件 109 行
 ```
 
 跟进上游时：
 
 1. `git fetch upstream main`（或 fetch 目标 tag）
 2. `git rebase upstream/main`（或该 tag）
-3. 只需关注 `streaming_iterator.py` —— 若官方重构了 `_delta_has_content` 或 `_augment_message_delta_usage`，`_visible_delta_gate` 的四个调用点和 warning 的接入点需要重新对齐
-4. `converse_transformation.py` 那 11 行只是一个 `and not ...` 条件加注释，冲突面极小；但**若官方自己在门 1 加了 ARN 豁免，直接丢掉本补丁用官方的**（判据：`map_openai_params` 的 `param == "thinking"` 分支里出现 `is_bedrock_application_inference_profile_arn`）
+3. 只需关注 `streaming_iterator.py` —— 若官方重构了 `_delta_has_content` 或 `_augment_message_delta_usage`，`_visible_delta_gate` 的四个调用点和 warning 的接入点需要重新对齐。另注意 `_visible_delta_gate` 依赖 `_delta_has_content` 的后置条件（返回 True 即保证 `delta` 是带合法 `type` 的 dict）才敢直接下标取 `delta["type"]`；官方若放宽该后置条件，这里要补回类型守卫
+4. `converse_transformation.py` 那 6 行只是一个 `and not ...` 条件加注释，冲突面极小；但**若官方自己在门 1 加了 ARN 豁免，直接丢掉本补丁用官方的**（判据：`map_openai_params` 的 `param == "thinking"` 分支里出现 `is_bedrock_application_inference_profile_arn`）
 5. 跑 `pytest tests/test_litellm/llms/anthropic/experimental_pass_through/adapters/ tests/test_litellm/llms/bedrock/chat/`
 
 如果哪天官方自己实现了这三项（可关注 `AnthropicFinishReason` 是否加入 `refusal`、门 1 是否加了 ARN 豁免），本分支即可退役，直接打官方镜像。

@@ -3,11 +3,11 @@
 Claude Code drives Opus 5 with ``thinking={"type": "adaptive"}`` plus
 ``output_config={"effort": ...}``. When the deployment points at an application
 inference profile ARN, the model id is an opaque suffix, so every cost-map
-capability probe reports "not an adaptive-thinking model". Before the fix that
-made ``map_openai_params`` rewrite the caller's explicit adaptive request into a
-legacy ``{"type": "enabled", "budget_tokens": 2048}`` budget while
-``output_config.effort`` was still forwarded verbatim — Bedrock received a
-contradictory pair and the requested effort tier was silently discarded.
+capability probe reports "not an adaptive-thinking model". Before the fix,
+``map_openai_params`` rewrote the caller's explicit adaptive request into a legacy
+``{"type": "enabled", "budget_tokens": 2048}`` budget while ``output_config.effort``
+was still forwarded verbatim: Bedrock received a contradictory pair and the
+requested effort tier was silently discarded.
 """
 
 import os

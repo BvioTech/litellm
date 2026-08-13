@@ -1345,12 +1345,10 @@ class LiteLLMAnthropicMessagesAdapter:
         elif openai_finish_reason == "tool_calls":
             return "tool_use"
         elif openai_finish_reason == "content_filter":
-            # Anthropic's own `refusal` stop_reason. Folding this into the
-            # `end_turn` fallback tells the client "the model finished saying
-            # what it wanted to say" for a turn that was actually cut off by a
-            # guardrail — with empty content the two become indistinguishable,
-            # so clients retry a request that can never succeed and
-            # success/failure counters record it as a healthy response.
+            # Anthropic's own `refusal`. Letting this fall through to the
+            # `end_turn` fallback makes a guardrail-blocked turn look completed
+            # once the content is empty: clients retry a request that can never
+            # succeed, and health counters score it as a success.
             return "refusal"
         return "end_turn"
 
