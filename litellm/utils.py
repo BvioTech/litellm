@@ -4426,6 +4426,22 @@ def get_optional_params(
                 optional_params = BedrockModelInfo.map_claude_platform_auth_params(
                     passed_params=passed_params, optional_params=optional_params
                 )
+        if bedrock_route in ("converse", "converse_like"):
+            # Claude 4.6+ rejects `thinking.type=enabled` outright, and on Bedrock the
+            # only id that resolves that capability is `model_info.base_model` — an
+            # application inference profile ARN carries none. Runs after
+            # map_openai_params so it also repairs a legacy budget that the
+            # capability-blind gates in there just synthesized. Upstream wires this
+            # into the native Messages route only, which ARNs never take.
+            from litellm.llms.anthropic.experimental_pass_through.messages.transformation import (
+                AnthropicMessagesConfig,
+            )
+
+            AnthropicMessagesConfig._translate_legacy_thinking_for_adaptive_model(
+                model=base_model or model,
+                optional_params=optional_params,
+                custom_llm_provider="bedrock",
+            )
     elif custom_llm_provider == "cloudflare":
         optional_params = litellm.CloudflareChatConfig().map_openai_params(
             model=model,

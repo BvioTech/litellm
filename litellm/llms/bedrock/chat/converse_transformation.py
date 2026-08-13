@@ -114,6 +114,10 @@ UNSUPPORTED_BEDROCK_CONVERSE_BETA_PATTERNS: Final = [
 ]
 
 
+# Effort tiers Bedrock only accepts while thinking is on.
+EFFORT_TIERS_REQUIRING_THINKING: Final = frozenset({"xhigh", "max"})
+
+
 class AmazonConverseConfig(BaseConfig):
     """
     Reference - https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html
@@ -467,6 +471,40 @@ class AmazonConverseConfig(BaseConfig):
                     self._validate_anthropic_adaptive_effort(model=model, effort=mapped_effort)
                     optional_params["output_config"] = existing_output_config
                     optional_params["_output_config_normalized"] = True
+
+    @staticmethod
+    def _enable_thinking_for_high_effort(
+        model: str, additional_request_params: dict, output_config: dict
+    ) -> None:
+        """Turn thinking on when the caller asks for an effort tier that requires it.
+
+        Bedrock rejects ``output_config.effort`` above ``high`` unless thinking is on,
+        yet clients routinely send a high tier with ``thinking`` absent or explicitly
+        disabled (claude-code#79798), which is self-contradictory. The effort tier is
+        the more specific signal, so honour it instead of failing the request. Only
+        ``adaptive`` can turn thinking on here: ``enabled``/``budget_tokens`` is
+        deprecated on Claude 4.6+ and rejected outright by 4.7 and the Mythos/Fable
+        models, per the Bedrock adaptive-thinking docs.
+        """
+        if output_config.get("effort") not in EFFORT_TIERS_REQUIRING_THINKING:
+            return
+        if not (
+            AnthropicConfig._is_adaptive_thinking_model(model, "bedrock")
+            or is_bedrock_application_inference_profile_arn(model)
+        ):
+            return
+        thinking: Final = additional_request_params.get("thinking")
+        if isinstance(thinking, dict) and thinking.get("type") in ("adaptive", "enabled"):
+            return
+        additional_request_params["thinking"] = {"type": "adaptive"}
+        verbose_logger.warning(
+            "Bedrock Converse - enabling adaptive thinking for model=%s: the request "
+            "asked for output_config.effort=%s, which Bedrock rejects while thinking "
+            "is off (caller sent thinking=%s)",
+            model,
+            output_config.get("effort"),
+            thinking,
+        )
 
     @staticmethod
     def _validate_anthropic_adaptive_effort(model: str, effort: str) -> None:
@@ -1344,6 +1382,11 @@ class AmazonConverseConfig(BaseConfig):
         additional_request_params = filter_exceptions_from_params(additional_request_params)
 
         if anthropic_output_config is not None and isinstance(anthropic_output_config, dict):
+            self._enable_thinking_for_high_effort(
+                model=model,
+                additional_request_params=additional_request_params,
+                output_config=anthropic_output_config,
+            )
             # Application inference profile ARNs hide the underlying model, so the
             # effort ceiling and capability gates below cannot run; forward
             # verbatim (like ``thinking``) and let Bedrock enforce.

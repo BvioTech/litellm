@@ -1002,6 +1002,27 @@ class LiteLLMAnthropicMessagesAdapter:
         new_kwargs["tools"] = translated_tools
         return tool_name_mapping
 
+    def _forward_bedrock_effort_config(
+        self,
+        anthropic_message_request: AnthropicMessagesRequest,
+        new_kwargs: ChatCompletionRequest,
+    ) -> None:
+        """Forward ``output_config`` minus ``format`` for Bedrock targets only.
+
+        Adaptive thinking without its effort tier makes Bedrock Converse return zero
+        reasoning blocks. Other bridged providers reject the raw param, and
+        ``get_llm_provider`` strips the ``bedrock/`` prefix before this runs.
+        """
+        model: Final = new_kwargs.get("model", "")
+        if not (model.startswith(("bedrock/", "converse/", "invoke/")) or self.is_bedrock_arn_model(model)):
+            return
+        claude_output_config: Final = anthropic_message_request.get("output_config")
+        if not isinstance(claude_output_config, dict):
+            return
+        effort_config: Final = {k: v for k, v in claude_output_config.items() if k != "format"}
+        if effort_config:
+            new_kwargs["output_config"] = effort_config  # rebind-ok: out-param store
+
     def _translate_thinking_to_openai(
         self,
         anthropic_message_request: AnthropicMessagesRequest,
@@ -1032,11 +1053,12 @@ class LiteLLMAnthropicMessagesAdapter:
         An adaptive request with no tier stays untouched either way, so the provider's own default
         still applies.
         """
-        if "thinking" not in anthropic_message_request:
-            return
-
-        thinking: Final = anthropic_message_request["thinking"]
+        thinking: Final = anthropic_message_request.get("thinking")
         if not thinking:
+            # Claude Code omits `thinking` on some turns while still sending a high
+            # effort tier (claude-code#79798). Dropping output_config here would throw
+            # away the caller's tier; forward it so the provider layer can reconcile.
+            self._forward_bedrock_effort_config(anthropic_message_request, new_kwargs)
             return
 
         model: Final = new_kwargs.get("model", "")
@@ -1049,10 +1071,7 @@ class LiteLLMAnthropicMessagesAdapter:
         if is_claude_target:
             new_kwargs["thinking"] = thinking
             if is_bedrock_target:
-                if isinstance(output_config, dict):
-                    effort_config: Final = {k: v for k, v in output_config.items() if k != "format"}
-                    if effort_config:
-                        new_kwargs["output_config"] = effort_config  # rebind-ok: out-param store like thinking above
+                self._forward_bedrock_effort_config(anthropic_message_request, new_kwargs)
                 return
             if not self._target_declares_reasoning_effort(model, custom_llm_provider):
                 return
