@@ -67,7 +67,14 @@ def _wire(base_model: str | None = BASE_MODEL, **kwargs) -> dict:
 
 @pytest.mark.parametrize(
     "budget_tokens, expected_effort",
-    [(16000, "xhigh"), (8192, "xhigh"), (4096, "high"), (2048, "medium"), (1024, "low")],
+    [
+        (16384, "xhigh"),
+        (16000, "xhigh"),
+        (8192, "xhigh"),
+        (4096, "high"),
+        (2048, "medium"),
+        (1024, "low"),
+    ],
 )
 def test_legacy_budget_is_translated_to_adaptive(budget_tokens: int, expected_effort: str) -> None:
     """A caller sending the legacy budget shape must not reach Bedrock with it.
@@ -137,6 +144,24 @@ def test_reasoning_effort_reaches_bedrock_as_adaptive() -> None:
 
     assert fields["thinking"] == {"type": "adaptive"}
     assert fields["output_config"]["effort"] == "high"
+
+
+@pytest.mark.parametrize(
+    "base_model",
+    [
+        "global.anthropic.claude-opus-5",
+        "global.anthropic.claude-opus-4-7",
+        "global.anthropic.claude-opus-4-6-v1",
+        "global.anthropic.claude-sonnet-5",
+        "global.anthropic.claude-sonnet-4-6",
+    ],
+)
+def test_reasoning_effort_max_survives_application_profile_bridge(base_model: str) -> None:
+    """Every adaptive model that advertises max must keep that tier behind an opaque ARN."""
+    fields = _wire(base_model=base_model, reasoning_effort="max")
+
+    assert fields["thinking"] == {"type": "adaptive"}
+    assert fields["output_config"]["effort"] == "max"
 
 
 def test_without_base_model_the_legacy_shape_survives() -> None:

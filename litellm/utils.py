@@ -4437,6 +4437,25 @@ def get_optional_params(
                 AnthropicMessagesConfig,
             )
 
+            reasoning_effort: Final = non_default_params.get("reasoning_effort")
+            if base_model is not None and isinstance(reasoning_effort, str):
+                # Preserve the caller's exact effort tier across an opaque application
+                # profile ARN. The capability-blind Converse mapper has already turned
+                # the alias into a legacy token budget; translating that budget back
+                # cannot distinguish an explicit `max` from an ordinary large legacy
+                # budget. Re-run the native effort mapper with the real base model,
+                # while retaining any caller-supplied native fields so they still win.
+                if "thinking" not in non_default_params:
+                    optional_params.pop("thinking", None)
+                if "output_config" not in non_default_params:
+                    optional_params.pop("output_config", None)
+                optional_params["reasoning_effort"] = reasoning_effort
+                AnthropicMessagesConfig._translate_reasoning_effort_to_anthropic(
+                    model=base_model,
+                    optional_params=optional_params,
+                    custom_llm_provider="bedrock",
+                )
+
             AnthropicMessagesConfig._translate_legacy_thinking_for_adaptive_model(
                 model=base_model or model,
                 optional_params=optional_params,
