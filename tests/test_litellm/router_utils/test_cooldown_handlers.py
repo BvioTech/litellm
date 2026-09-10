@@ -1,12 +1,125 @@
+import json
+from datetime import datetime, timezone
+from typing import Final
 from unittest.mock import MagicMock, patch
+
+import httpx
+import pytest
 
 import litellm
 from litellm.router_utils.cooldown_handlers import (
+    _async_get_cooldown_deployments,
     _get_deployment_cooldown_policy,
     _resolve_allowed_fails_from_policy,
     _should_cooldown_based_on_deployment_policy,
     should_cooldown_based_on_allowed_fails_policy,
 )
+
+BEDROCK_ACCOUNT_DENIED_MESSAGE: Final = "Access to Anthropic models is not allowed for this account."
+
+
+def _bedrock_exception(
+    provider: str = "bedrock",
+    body: object | None = None,
+    status: int = 400,
+) -> litellm.BadRequestError | litellm.PermissionDeniedError:
+    error_class: Final = litellm.BadRequestError if status == 400 else litellm.PermissionDeniedError
+    response: Final = httpx.Response(
+        status,
+        request=httpx.Request("POST", "https://bedrock.example/converse"),
+    )
+    return error_class(
+        message=f"BedrockException - {json.dumps(body)}. Received Model Group=claude-opus-5",
+        model="us.anthropic.claude-opus-5",
+        llm_provider=provider,
+        response=response,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider,body,status,expected",
+    [
+        ("bedrock", {"message": BEDROCK_ACCOUNT_DENIED_MESSAGE}, 400, True),
+        ("bedrock", {"message": " access TO Anthropic  models is not allowed for this account "}, 400, True),
+        ("bedrock", {"message": BEDROCK_ACCOUNT_DENIED_MESSAGE}, 403, True),
+        ("openai", {"message": BEDROCK_ACCOUNT_DENIED_MESSAGE}, 400, False),
+        ("anthropic", {"message": BEDROCK_ACCOUNT_DENIED_MESSAGE}, 400, False),
+        ("bedrock", {"message": "thinking.type.enabled is not supported for this model"}, 400, False),
+        (
+            "bedrock",
+            {"message": f"Invalid input: {BEDROCK_ACCOUNT_DENIED_MESSAGE}"},
+            400,
+            False,
+        ),
+        ("bedrock", {"error": {"message": BEDROCK_ACCOUNT_DENIED_MESSAGE}}, 400, False),
+        ("bedrock", {"message": None}, 400, False),
+        ("bedrock", BEDROCK_ACCOUNT_DENIED_MESSAGE, 400, False),
+    ],
+)
+async def test_bedrock_account_denial_cools_only_the_matching_deployment(
+    provider: str, body: object, status: int, expected: bool
+) -> None:
+    router: Final = litellm.Router(
+        model_list=[
+            {
+                "model_name": "claude-opus-5",
+                "litellm_params": {"model": "bedrock/us.anthropic.claude-opus-5"},
+                "model_info": {"id": "denied", "cooldown_time": 300},
+            }
+        ],
+        allowed_fails=100,
+    )
+    error: Final = _bedrock_exception(provider=provider, body=body, status=status)
+    now: Final = datetime.now(timezone.utc)
+    expected_cooldowns: Final = ["denied"] if expected else []
+    try:
+        assert (
+            router.deployment_callback_on_failure(
+                kwargs={"exception": error, "litellm_params": {"model_info": {"id": "denied", "cooldown_time": 300}}},
+                completion_response=None,
+                start_time=now,
+                end_time=now,
+            )
+            is expected
+        )
+        assert await _async_get_cooldown_deployments(router, None) == expected_cooldowns
+    finally:
+        router.reset()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disabled,cooldown_time", [(True, 300), (False, 0)])
+async def test_bedrock_account_denial_respects_cooldown_disable(disabled: bool, cooldown_time: int) -> None:
+    router: Final = litellm.Router(
+        model_list=[
+            {
+                "model_name": "claude-opus-5",
+                "litellm_params": {"model": "bedrock/us.anthropic.claude-opus-5"},
+                "model_info": {"id": "denied", "cooldown_time": cooldown_time},
+            }
+        ],
+        disable_cooldowns=disabled,
+    )
+    now: Final = datetime.now(timezone.utc)
+    try:
+        assert (
+            router.deployment_callback_on_failure(
+                kwargs={
+                    "exception": _bedrock_exception(
+                        body={"message": BEDROCK_ACCOUNT_DENIED_MESSAGE},
+                    ),
+                    "litellm_params": {"model_info": {"id": "denied", "cooldown_time": cooldown_time}},
+                },
+                completion_response=None,
+                start_time=now,
+                end_time=now,
+            )
+            is False
+        )
+        assert await _async_get_cooldown_deployments(router, None) == []
+    finally:
+        router.reset()
 
 
 class TestGetDeploymentCooldownPolicy:

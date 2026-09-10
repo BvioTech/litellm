@@ -139,6 +139,7 @@ from litellm.router_utils.cooldown_handlers import (
     _get_cooldown_deployments,
     _set_cooldown_deployments,
     is_advisor_orchestration_failure,
+    is_bedrock_account_access_denied,
 )
 from litellm.router_utils.fallback_event_handlers import (
     AttemptedFallbackTargets,
@@ -7403,6 +7404,11 @@ class Router:
 
         if isinstance(error, litellm.ContentPolicyViolationError) and content_policy_fallbacks is not None:
             raise error
+
+        if is_bedrock_account_access_denied(error):
+            if _num_all_deployments <= 1 or _num_healthy_deployments <= 0:
+                raise error
+            return True
 
         status_code: Final = getattr(error, "status_code", None)
         if status_code is not None and not litellm._should_retry(status_code):

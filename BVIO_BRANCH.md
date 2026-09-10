@@ -21,6 +21,17 @@
 | 高 effort 与关闭 thinking 的冲突 | 保留既有 Bvio 策略：`xhigh` / `max` 所需的 thinking 缺失或关闭时启用 adaptive；`high` 及以下尊重显式 disabled |
 | 缺少 thinking 时的 effort | Anthropic Messages 桥仍转发 Bedrock 原生 `output_config.effort` |
 | OpenAI 风格 reasoning_effort | 在 Claude 的真实 base model 上恢复档位，保留 Opus 5 的 `max` 和调用方显式原生字段 |
+| Bedrock 账号访问拒绝 | 精确识别 Anthropic 账号拒绝错误，首次失败即冷却该 deployment，并在现有重试预算内选择健康候选 |
+
+## Bedrock 账号访问拒绝与选路
+
+Router 对 Bedrock 的 `BadRequestError` / `PermissionDeniedError` 提取上游 JSON 顶层 `message`，使用完整匹配识别 `Access to Anthropic models is not allowed for this account.`。规则容忍大小写、空白和句末句点差异，普通参数错误及其他 provider 保持既有处理
+
+命中后立即将失败的 deployment 加入 cooldown，时长沿用既有 `cooldown_time`；`disable_cooldowns` 和 deployment 的 `cooldown_time: 0` 仍可停用冷却。冷却按 deployment ID 生效，共用 AWS 账号的其他 deployment 不会被批量修改
+
+当同一模型组还有健康候选时，当前请求可继续重试，受原有 `num_retries` / retry policy 约束。`num_retries: 0` 会保留错误并冷却失败的 deployment，后续请求可跳过它；没有健康候选时返回错误。该规则不会遍历超出重试预算的所有账号，也不会自动创建跨模型组 fallback
+
+本地 HTTP 服务回归覆盖 Chat Completions 和 Anthropic Messages 的流式及非流式入口：两个 deployment 连续返回该 400 后，同一请求从第三个获得回复；普通 400 不触发冷却或重试；禁用重试与全部候选被拒绝时正常终止。流式成功响应使用真实 Bedrock EventStream 编码，验证回复文本和 Messages 终止事件仅输出一次。相关冷却、重试与加权 failover 回归共 170 passed；未进行真实 AWS 或线上验收
 
 ## v1.100.0 适配
 
