@@ -8,6 +8,25 @@
 
 镜像构建使用完整 checkout 的仓库根 `Dockerfile`，构建上下文需要包含 UI、Rust 和其他构建目录。保留 v1.100.0 的 glibc 2.44 基础镜像与 Python 3.13；UI 安装不挂载 npm cache，uv 禁止托管 Python 下载并显式使用 `/usr/bin/python3.13`
 
+## 自动构建与镜像发布
+
+[Docker Build and Publish](.github/workflows/docker-publish.yml) 在每次 push 到 `litellm-Bvio` 时构建根 Dockerfile，并推送 `linux/amd64` 镜像到 ECR。分支标签为 `litellm-bvio`，固定提交标签为 `sha-<完整提交 SHA>`。同分支的新 push 会取消尚未完成的旧构建，构建缓存保存在 GitHub Actions
+
+在仓库 Settings > Secrets and variables > Actions 配置以下 Repository variables：
+
+| 变量 | 内容 |
+| --- | --- |
+| `AWS_REGION` | 目标 ECR 所在区域 |
+| `AWS_ROLE_ARN` | GitHub Actions 通过 OIDC 承担的 IAM role |
+| `ECR_REGISTRY_ID` | 目标 ECR 的 12 位 AWS 账号 ID |
+| `ECR_REPOSITORY` | ECR repository 名称，例如 `violoop/litellm` |
+
+IAM role 的信任策略需允许本仓库 `litellm-Bvio` 分支的 GitHub OIDC 身份，权限需覆盖目标 repository 的镜像推送与读取，以及 `ecr:GetAuthorizationToken`。目标 repository 需预先存在；跨账号推送还需目标 repository policy 授权
+
+飞书通知使用 Repository secret `FEISHU_WEBHOOK`，构建成功或失败后发送结果、提交和 Actions 链接；成功时同时发送镜像地址与 digest。未设置该 Secret 时跳过通知。Webhook 不写入源码；通知失败不改变镜像构建结果
+
+Actions summary 保存固定提交镜像地址和 digest，可据此选择部署版本。手动触发时选择 `litellm-Bvio` 分支；工作流进入仓库默认分支后，GitHub 才会显示 `workflow_dispatch` 入口
+
 ## 保留的行为
 
 以下结论以 `v1.100.0` 的实际代码为准

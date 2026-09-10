@@ -1,0 +1,137 @@
+name: Docker Build and Publish
+
+on:
+  push:
+    branches:
+      - litellm-Bvio
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/litellm-Bvio'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      ECR_REGISTRY_ID: ${{ vars.ECR_REGISTRY_ID }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+    outputs:
+      image: ${{ steps.login-ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:sha-${{ github.sha }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Check publishing configuration
+        run: |
+          : "${AWS_REGION:?Set the AWS_REGION repository variable}"
+          : "${AWS_ROLE_ARN:?Set the AWS_ROLE_ARN repository variable}"
+          : "${ECR_REGISTRY_ID:?Set the ECR_REGISTRY_ID repository variable}"
+          : "${ECR_REPOSITORY:?Set the ECR_REPOSITORY repository variable}"
+
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        with:
+          driver: docker-container
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: github-litellm-${{ github.run_id }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+        with:
+          registries: ${{ env.ECR_REGISTRY_ID }}
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:litellm-bvio
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=litellm-bvio-amd64
+          cache-to: type=gha,scope=litellm-bvio-amd64,mode=max
+
+      - name: Verify published image
+        env:
+          LITELLM_IMAGE: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:sha-${{ github.sha }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools inspect "$LITELLM_IMAGE"
+          printf 'Image: `%s`\n\nDigest: `%s`\n' "$LITELLM_IMAGE" "$IMAGE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+
+  notify:
+    needs: build
+    if: ${{ always() && !cancelled() && needs.build.result != 'skipped' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Notify Feishu
+        continue-on-error: true
+        env:
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          PUBLISHED_IMAGE: ${{ needs.build.outputs.image }}
+          IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+          from typing import Final
+
+          webhook: Final = os.environ.get("FEISHU_WEBHOOK")
+          if not webhook:
+              print("FEISHU_WEBHOOK is not configured; notification skipped")
+              raise SystemExit(0)
+
+          result: Final = os.environ["BUILD_RESULT"]
+          run_url: Final = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          image_details: Final = (
+              (f"镜像：{os.environ['PUBLISHED_IMAGE']}", f"Digest：{os.environ['IMAGE_DIGEST']}")
+              if result == "success" else ()
+          )
+          lines: Final = (
+              f"LiteLLM Docker 构建：{'成功' if result == 'success' else '失败'}",
+              f"分支：{os.environ['GITHUB_REF_NAME']}",
+              f"提交：{os.environ['GITHUB_SHA'][:12]}",
+              *image_details,
+              f"构建详情：{run_url}",
+          )
+          payload: Final = json.dumps({"msg_type": "text", "content": {"text": "\n".join(lines)}}).encode()
+          request: Final = urllib.request.Request(webhook, data=payload, headers={"Content-Type": "application/json"})
+          try:
+              with urllib.request.urlopen(request, timeout=15) as response:
+                  body: Final = json.load(response)
+          except (urllib.error.URLError, TimeoutError):
+              raise RuntimeError("Failed to deliver the Feishu build notification") from None
+          if body.get("code", body.get("StatusCode")) != 0:
+              raise RuntimeError("Feishu rejected the build notification")
+          print("Feishu build notification delivered")
+          PY
