@@ -4427,34 +4427,35 @@ def get_optional_params(
                     passed_params=passed_params, optional_params=optional_params
                 )
         if bedrock_route in ("converse", "converse_like"):
-            # Claude 4.6+ rejects `thinking.type=enabled` outright, and on Bedrock the
-            # only id that resolves that capability is `model_info.base_model` — an
-            # application inference profile ARN carries none. Runs after
-            # map_openai_params so it also repairs a legacy budget that the
-            # capability-blind gates in there just synthesized. Upstream wires this
-            # into the native Messages route only, which ARNs never take.
+            # An application profile ARN hides the model's thinking capabilities.
+            # Use base_model after mapping to repair synthesized legacy budgets too.
             from litellm.llms.anthropic.experimental_pass_through.messages.transformation import (
                 AnthropicMessagesConfig,
             )
+            from litellm.llms.bedrock.common_utils import normalize_bedrock_opus_output_config_effort
 
             reasoning_effort: Final = non_default_params.get("reasoning_effort")
-            if base_model is not None and isinstance(reasoning_effort, str):
+            if base_model is not None and BedrockModelInfo.get_base_model(base_model).startswith("anthropic."):
                 # Preserve the caller's exact effort tier across an opaque application
                 # profile ARN. The capability-blind Converse mapper has already turned
                 # the alias into a legacy token budget; translating that budget back
                 # cannot distinguish an explicit `max` from an ordinary large legacy
                 # budget. Re-run the native effort mapper with the real base model,
                 # while retaining any caller-supplied native fields so they still win.
-                if "thinking" not in non_default_params:
-                    optional_params.pop("thinking", None)
-                if "output_config" not in non_default_params:
-                    optional_params.pop("output_config", None)
-                optional_params["reasoning_effort"] = reasoning_effort
-                AnthropicMessagesConfig._translate_reasoning_effort_to_anthropic(
-                    model=base_model,
-                    optional_params=optional_params,
-                    custom_llm_provider="bedrock",
-                )
+                if isinstance(reasoning_effort, str):
+                    if "thinking" not in non_default_params:
+                        optional_params.pop("thinking", None)
+                    if "output_config" not in non_default_params:
+                        optional_params.pop("output_config", None)
+                    normalized_effort: Final = {"effort": reasoning_effort}
+                    normalize_bedrock_opus_output_config_effort(model=base_model, output_config=normalized_effort)
+                    optional_params["reasoning_effort"] = normalized_effort["effort"]
+                    AnthropicMessagesConfig._translate_reasoning_effort_to_anthropic(
+                        model=base_model,
+                        optional_params=optional_params,
+                        max_tokens=optional_params.get("maxTokens"),
+                        custom_llm_provider="bedrock",
+                    )
 
             AnthropicMessagesConfig._translate_legacy_thinking_for_adaptive_model(
                 model=base_model or model,
@@ -4722,6 +4723,17 @@ def get_optional_params(
         openai_params=list(DEFAULT_CHAT_COMPLETION_PARAM_VALUES.keys()),
         additional_drop_params=additional_drop_params,
     )
+    if (
+        custom_llm_provider == "bedrock"
+        and base_model is not None
+        and BedrockModelInfo.get_bedrock_route(model) in ("converse", "converse_like")
+        and BedrockModelInfo.get_base_model(base_model).startswith("anthropic.")
+        and isinstance(optional_params.get("output_config"), dict)
+    ):
+        # Provider-specific passthrough can restore the caller's original output_config.
+        normalized_output_config: Final = dict(optional_params["output_config"])
+        normalize_bedrock_opus_output_config_effort(model=base_model, output_config=normalized_output_config)
+        optional_params["output_config"] = normalized_output_config
     print_verbose(f"Final returned optional params: {optional_params}")
     optional_params = _apply_openai_param_overrides(
         optional_params=optional_params,

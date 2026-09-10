@@ -396,7 +396,10 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
         the visibility check needs no further guarding.
         """
         has_content: Final = self._delta_has_content(processed_chunk)
-        if has_content and processed_chunk["delta"]["type"] in _VISIBLE_DELTA_TYPES:
+        # A queued tool_use start is visible even when the tool has no arguments.
+        if self.current_content_block_type == "tool_use" or (
+            has_content and processed_chunk["delta"]["type"] in _VISIBLE_DELTA_TYPES
+        ):
             self.emitted_visible_delta = True
         return has_content
 

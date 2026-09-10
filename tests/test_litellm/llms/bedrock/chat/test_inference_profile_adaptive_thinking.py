@@ -1,4 +1,4 @@
-"""Thinking reaches Bedrock in the one shape Claude 4.6+ accepts, behind an ARN.
+"""Thinking reaches Bedrock in the shape required by the model behind an ARN.
 
 An application inference profile ARN is an opaque id, so every cost-map capability
 probe reports "not an adaptive-thinking model" and the capability-blind gates
@@ -15,6 +15,7 @@ after ``map_openai_params`` has already done its capability-blind rewriting.
 
 import os
 import sys
+from typing import Final
 
 import pytest
 
@@ -142,8 +143,84 @@ def test_reasoning_effort_reaches_bedrock_as_adaptive() -> None:
     """
     fields = _wire(reasoning_effort="high")
 
-    assert fields["thinking"] == {"type": "adaptive"}
+    assert fields["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert fields["output_config"]["effort"] == "high"
+
+
+def test_reasoning_effort_budget_respects_max_completion_tokens() -> None:
+    params: Final = litellm.utils.get_optional_params(
+        model=ARN,
+        custom_llm_provider="bedrock",
+        base_model=LEGACY_MODEL,
+        reasoning_effort="high",
+        max_tokens=32000,
+        max_completion_tokens=2048,
+    )
+
+    assert params["maxTokens"] == 2048
+    assert params["thinking"] == {"type": "enabled", "budget_tokens": 2047}
+
+
+def test_claude_46_keeps_an_explicit_legacy_budget() -> None:
+    fields: Final = _wire(
+        base_model="us.anthropic.claude-opus-4-6-v1",
+        thinking={"type": "enabled", "budget_tokens": 16000},
+    )
+
+    assert fields["thinking"] == {"type": "enabled", "budget_tokens": 16000}
+
+
+@pytest.mark.parametrize("model", [ARN, "us.anthropic.claude-opus-4-6-v1"])
+def test_claude_46_base_model_preserves_bedrock_effort_normalization(model: str) -> None:
+    params: Final = litellm.utils.get_optional_params(
+        model=model,
+        custom_llm_provider="bedrock",
+        base_model="us.anthropic.claude-opus-4-6-v1",
+        reasoning_effort="xhigh",
+        max_tokens=32000,
+    )
+
+    assert params["thinking"]["type"] == "adaptive"
+    assert params["output_config"]["effort"] == "max"
+
+
+def test_claude_46_native_effort_is_normalized_behind_an_arn() -> None:
+    output_config: Final = {"effort": "xhigh"}
+    fields: Final = _wire(
+        base_model="us.anthropic.claude-opus-4-6-v1",
+        thinking={"type": "adaptive"},
+        output_config=output_config,
+    )
+
+    assert fields["output_config"]["effort"] == "max"
+    assert output_config == {"effort": "xhigh"}
+
+
+@pytest.mark.parametrize(
+    "model, expected_param, expected_value",
+    [
+        ("converse/openai.gpt-oss-120b-1:0", "reasoning_effort", "high"),
+        (
+            "converse/amazon.nova-2-lite-v1:0",
+            "reasoningConfig",
+            {"type": "enabled", "maxReasoningEffort": "high"},
+        ),
+    ],
+)
+def test_non_claude_base_model_keeps_provider_reasoning(
+    model: str, expected_param: str, expected_value: str | dict[str, str]
+) -> None:
+    params: Final = litellm.utils.get_optional_params(
+        model=model,
+        custom_llm_provider="bedrock",
+        base_model=model.removeprefix("converse/"),
+        reasoning_effort="high",
+        max_tokens=32000,
+    )
+
+    assert params[expected_param] == expected_value
+    assert "thinking" not in params
+    assert "output_config" not in params
 
 
 @pytest.mark.parametrize(
@@ -160,7 +237,7 @@ def test_reasoning_effort_max_survives_application_profile_bridge(base_model: st
     """Every adaptive model that advertises max must keep that tier behind an opaque ARN."""
     fields = _wire(base_model=base_model, reasoning_effort="max")
 
-    assert fields["thinking"] == {"type": "adaptive"}
+    assert fields["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert fields["output_config"]["effort"] == "max"
 
 

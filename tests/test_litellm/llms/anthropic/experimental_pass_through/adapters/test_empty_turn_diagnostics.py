@@ -15,6 +15,7 @@ that blind spot:
 
 import asyncio
 from collections.abc import AsyncIterator
+from typing import Final
 from unittest.mock import patch
 
 import pytest
@@ -135,6 +136,42 @@ def test_visible_output_does_not_warn() -> None:
     assert "Hello." in sse
     assert _warnings_about_empty_turn(mock_logger) == []
     assert wrapper.emitted_visible_delta is True
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("leading_thinking", [False, True])
+def test_zero_argument_tool_is_visible(is_async: bool, leading_thinking: bool) -> None:
+    chunks: Final = ((_signature_only_chunk(),) if leading_thinking else ()) + (
+        ModelResponseStream(
+            choices=[
+                StreamingChoices(
+                    index=0,
+                    delta=Delta(
+                        tool_calls=[
+                            {
+                                "index": 0,
+                                "id": "call_test",
+                                "type": "function",
+                                "function": {"name": "get_time", "arguments": ""},
+                            }
+                        ]
+                    ),
+                    finish_reason=None,
+                )
+            ]
+        ),
+        _finish_chunk("tool_calls"),
+    )
+    wrapper: Final = AnthropicStreamWrapper(
+        completion_stream=_stream_of(*chunks) if is_async else iter(chunks), model=_MODEL
+    )
+    with patch(_LOGGER_PATH) as mock_logger:
+        sse: Final = _collect_async(wrapper) if is_async else b"".join(wrapper.anthropic_sse_wrapper()).decode()
+
+    assert '"name": "get_time"' in sse
+    assert '"input": {}' in sse
+    assert '"stop_reason": "tool_use"' in sse
+    assert _warnings_about_empty_turn(mock_logger) == []
 
 
 def test_warning_fires_once_per_stream() -> None:
