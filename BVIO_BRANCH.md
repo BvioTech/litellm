@@ -40,17 +40,31 @@ Actions summary 保存固定提交镜像地址和 digest，可据此选择部署
 | 高 effort 与关闭 thinking 的冲突 | 保留既有 Bvio 策略：`xhigh` / `max` 所需的 thinking 缺失或关闭时启用 adaptive；`high` 及以下尊重显式 disabled |
 | 缺少 thinking 时的 effort | Anthropic Messages 桥仍转发 Bedrock 原生 `output_config.effort` |
 | OpenAI 风格 reasoning_effort | 在 Claude 的真实 base model 上恢复档位，保留 Opus 5 的 `max` 和调用方显式原生字段 |
-| Bedrock 账号访问拒绝 | 精确识别 Anthropic 账号拒绝错误，首次失败即冷却该 deployment，并在现有重试预算内选择健康候选 |
+| Bedrock 账号访问拒绝 | 识别 Anthropic 账号拒绝错误，把命中的 deployment 标记 `blocked` 并在 proxy DB 持久化，同时通过 `FEISHU_WEBHOOK_URL` 告警 |
 
-## Bedrock 账号访问拒绝与选路
+## Bedrock 账号访问拒绝与 deployment 停用
 
-Router 对 Bedrock 的 `BadRequestError` / `PermissionDeniedError` 提取上游 JSON 顶层 `message`，使用完整匹配识别 `Access to Anthropic models is not allowed for this account.`。规则容忍大小写、空白和句末句点差异，普通参数错误及其他 provider 保持既有处理
+Router 对 Bedrock 的 `BadRequestError` / `PermissionDeniedError` 取上游错误的顶层 `message`，以前缀匹配识别 `Access to Anthropic models is not allowed for this account.`。三个解析细节：
 
-命中后立即将失败的 deployment 加入 cooldown，时长沿用既有 `cooldown_time`；`disable_cooldowns` 和 deployment 的 `cooldown_time: 0` 仍可停用冷却。冷却按 deployment ID 生效，共用 AWS 账号的其他 deployment 不会被批量修改
+- 用前缀而非整句相等，因为 Bedrock 会在同一句后追加说明（例如 `For additional access options, contact AWS Sales at ...`）
+- 用前缀而非任意位置搜索，因为请求自身的 prompt 被回显进普通参数错误时不应命中
+- 流式入口抛错时 body 是 bytes 的 repr（`converse_handler` 传的是 `str(response.read())`），解析前先还原，否则整条流式链路都识别不到。顶层 `message` 键大小写不敏感，AWS 两种都返过
 
-当同一模型组还有健康候选时，当前请求可继续重试，受原有 `num_retries` / retry policy 约束。`num_retries: 0` 会保留错误并冷却失败的 deployment，后续请求可跳过它；没有健康候选时返回错误。该规则不会遍历超出重试预算的所有账号，也不会自动创建跨模型组 fallback
+规则容忍大小写、空白和句末句点差异，普通参数错误及其他 provider 保持既有处理
 
-本地 HTTP 服务回归覆盖 Chat Completions 和 Anthropic Messages 的流式及非流式入口：两个 deployment 连续返回该 400 后，同一请求从第三个获得回复；普通 400 不触发冷却或重试；禁用重试与全部候选被拒绝时正常终止。流式成功响应使用真实 Bedrock EventStream 编码，验证回复文本和 Messages 终止事件仅输出一次。相关冷却、重试与加权 failover 回归共 170 passed；未进行真实 AWS 或线上验收
+该拒绝需要 AWS 侧改动才能恢复，短 TTL 的 cooldown 只会让它冷却几秒后又被选中，因此改为停用 deployment：
+
+1. 把 `model_info.blocked` 置为 true，这正是 `Router._filter_blocked_deployments()` 在所有选路入口已经过滤的字段，下一次选路即生效
+2. proxy 环境下同时把 `LiteLLM_ProxyModelTable.blocked` 写为 true。`ModelRepository.table` 已被 config-sync 包装，该写入自带跨副本广播；reconcile 从 DB 行读回 `blocked`，因此重启和其他 pod 都生效，不需要额外的内存黑名单。config.yaml 的部署在 DB 里没有行，只有本进程内存生效，reload 会恢复
+3. 通过 `FEISHU_WEBHOOK_URL` 发送告警，内容包含 deployment id、model（ARN 原文，用于定位 AWS 账号和 inference profile）、model group 和上游错误原文。只放已解析出的上游 message，不放 `str(exception)`：后者带请求上下文，可能含签名 URL 里的凭据。未配置该变量时只跳过告警，投递失败也不影响请求
+
+按 deployment 处理，不做账号级连带：同一 AWS 账号下的其他模型各自被请求到时各自命中、各自停用、各自告警。按 ARN 账号号分组只对 ARN 形态有效，省下的也只是每个模型一次失败请求
+
+停用发生在失败回调里，fallback 路径另有一处钩子（该路径的 deployment 因 `has_logged_async_failure` 不走失败回调）。停用不改变候选列表长度，`should_retry_this_error` 统计的 `all_deployments` 保持不变，因此同一请求仍按原有 `num_retries` / retry policy 重试健康候选，两个 deployment 的模型组也能正常降级；`num_retries: 0` 时保留原错误
+
+停用不是 cooldown，`disable_cooldowns` 与 deployment 的 `cooldown_time: 0` 不再能停用它；这两个开关只影响 cooldown 路径
+
+本地 HTTP 服务回归覆盖 Chat Completions 和 Anthropic Messages 的流式及非流式入口：连续命中后同一请求从第三个候选获得回复；两个 deployment（一禁一健康）能降级；普通 400 不停用也不重试；禁用重试与全部候选被拒绝时正常终止。流式成功响应使用真实 Bedrock EventStream 编码，验证回复文本和 Messages 终止事件仅输出一次。单元测试另外覆盖识别边界（含流式 bytes body、prompt 回显、大小写键）、幂等告警、告警不含凭据以及飞书投递失败不影响请求。未进行真实 AWS 或线上验收
 
 ## v1.100.0 适配
 

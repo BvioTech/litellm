@@ -20,6 +20,10 @@ from litellm.router_utils.cooldown_handlers import (
     cast_exception_status_to_int,
     is_advisor_orchestration_failure,
 )
+from litellm.router_utils.denied_account_block import (
+    block_denied_bedrock_deployment,
+    is_bedrock_account_access_denied,
+)
 from litellm.router_utils.router_callbacks.track_deployment_metrics import (
     increment_deployment_failures_for_current_minute,
 )
@@ -95,6 +99,17 @@ def _trigger_cooldown_for_failed_deployment(
 
         if deployment_id is None:
             verbose_router_logger.debug("Cannot trigger cooldown for fallback: no failed_deployment_id on exception")
+            return
+
+        if is_bedrock_account_access_denied(exception):
+            # Same handling as the primary path's failure callback, which this fallback
+            # target never reaches: block the deployment instead of cooling it down.
+            block_denied_bedrock_deployment(
+                router=litellm_router,
+                deployment_id=deployment_id,
+                exception=exception,
+                model_group=kwargs.get("model"),
+            )
             return
 
         # Priority: deployment config > response header > router default, matching

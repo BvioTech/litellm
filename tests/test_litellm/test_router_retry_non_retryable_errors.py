@@ -61,13 +61,19 @@ def _retry_succeeds(account_denied: bool, healthy_peer: bool, num_retries: int) 
 
 
 def _expected_cooldowns(account_denied: bool, healthy_peer: bool, num_retries: int) -> list[str]:
+    # The account-level denial is never a cooldown: the deployment is blocked instead.
+    return []
+
+
+def _expected_blocked(account_denied: bool, healthy_peer: bool, num_retries: int) -> list[str]:
+    third_deployment: Final = "healthy" if healthy_peer else "denied-2"
     if not account_denied:
         return []
-    if _retry_succeeds(account_denied, healthy_peer, num_retries):
-        return ["denied-0", "denied-1"]
     if num_retries == 0:
         return ["denied-0"]
-    return ["denied-0", "denied-1", "denied-2"]
+    if healthy_peer:
+        return ["denied-0", "denied-1"]
+    return ["denied-0", "denied-1", third_deployment]
 
 
 def _expected_requests(account_denied: bool, healthy_peer: bool, num_retries: int) -> list[str]:
@@ -82,9 +88,18 @@ def _expected_requests(account_denied: bool, healthy_peer: bool, num_retries: in
 @pytest.mark.parametrize("stream", [True, False])
 @pytest.mark.parametrize("num_retries,healthy_peer", [(0, True), (2, True), (5, False)])
 async def test_bedrock_account_denial_retries_healthy_deployment(
-    entrypoint: str, account_denied: bool, stream: bool, num_retries: int, healthy_peer: bool, unused_tcp_port: int
+    entrypoint: str,
+    account_denied: bool,
+    stream: bool,
+    num_retries: int,
+    healthy_peer: bool,
+    unused_tcp_port: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     received: Final = Mock()
+    alerts: Final[list[str]] = []
+    monkeypatch.setattr("litellm.router_utils.denied_account_block.schedule_feishu_text_alert", alerts.append)
+    monkeypatch.setattr("litellm.router_utils.denied_account_block._schedule_blocked_persistence", lambda ids: None)
 
     async def respond(request: web.Request) -> web.Response:
         received(request.path)
@@ -113,14 +128,18 @@ async def test_bedrock_account_denial_retries_healthy_deployment(
     await runner.setup()
     site: Final = web.TCPSite(runner, "127.0.0.1", unused_tcp_port)
     await site.start()
-    bedrock_model_prefix: Final = "bedrock/arn:aws:bedrock:us-east-2:000000000000:application-inference-profile/"
+    # One AWS account per deployment mirrors production, where each application inference
+    # profile ARN belongs to its own account. Only the denied deployment is blocked either
+    # way: the handling is per deployment, not per account.
+    bedrock_model_prefix: Final = "bedrock/arn:aws:bedrock:us-east-2:{account}:application-inference-profile/"
+    accounts: Final = ("000000000001", "000000000002", "000000000003")
     third_deployment: Final = "healthy" if healthy_peer else "denied-2"
     router: Final = Router(
         model_list=[
             {
                 "model_name": "claude-opus-5",
                 "litellm_params": {
-                    "model": f"{bedrock_model_prefix}{deployment}",
+                    "model": f"{bedrock_model_prefix.format(account=account)}{deployment}",
                     "aws_region_name": "us-east-2",
                     "aws_access_key_id": "offline-access-key",
                     "aws_secret_access_key": "offline-secret-key",
@@ -129,7 +148,9 @@ async def test_bedrock_account_denial_retries_healthy_deployment(
                 },
                 "model_info": {"id": deployment, "base_model": "us.anthropic.claude-opus-5"},
             }
-            for order, deployment in enumerate(("denied-0", "denied-1", third_deployment))
+            for order, (account, deployment) in enumerate(
+                zip(accounts, ("denied-0", "denied-1", third_deployment))
+            )
         ],
         num_retries=num_retries,
         allowed_fails=100,
@@ -170,9 +191,99 @@ async def test_bedrock_account_denial_retries_healthy_deployment(
             assert sorted(await _async_get_cooldown_deployments(router, None)) == _expected_cooldowns(
                 account_denied, healthy_peer, num_retries
             )
+        expected_blocked: Final = _expected_blocked(account_denied, healthy_peer, num_retries)
+        model_list: Final = router.get_model_list(model_name="claude-opus-5") or []
+        # Blocking leaves the candidate list intact, unlike removing the deployment: the
+        # retry guard counts all_deployments, so shrinking it would strand a 2-deployment
+        # model group on its first denial.
+        assert sorted(d["model_info"]["id"] for d in model_list) == sorted(
+            ("denied-0", "denied-1", third_deployment)
+        )
+        assert sorted(d["model_info"]["id"] for d in model_list if d["model_info"].get("blocked") is True) == sorted(
+            expected_blocked
+        )
+        assert len(alerts) == len(expected_blocked)
         assert [mock_call.args[0].rsplit("/", 2)[1] for mock_call in received.call_args_list] == _expected_requests(
             account_denied, healthy_peer, num_retries
         )
+    finally:
+        router.reset()
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", ["chat_completions", "anthropic_messages"])
+async def test_bedrock_account_denial_falls_over_with_only_two_deployments(
+    entrypoint: str, unused_tcp_port: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A denied deployment plus one healthy peer still serves the request.
+
+    Regression: pausing via `blocked` keeps the deployment in `all_deployments`, which
+    `should_retry_this_error` counts. Removing it from the model list instead dropped that
+    count to 1 and tripped the "no other deployment to try" guard, so the smallest
+    interesting model group raised the denial to the caller instead of failing over.
+    """
+    monkeypatch.setattr("litellm.router_utils.denied_account_block.schedule_feishu_text_alert", lambda text: None)
+    monkeypatch.setattr("litellm.router_utils.denied_account_block._schedule_blocked_persistence", lambda ids: None)
+    received: Final = Mock()
+
+    async def respond(request: web.Request) -> web.Response:
+        received(request.path)
+        if "denied" in request.path:
+            return web.json_response({"message": BEDROCK_ACCOUNT_DENIED_MESSAGE}, status=400)
+        return web.json_response(
+            {
+                "output": {"message": {"role": "assistant", "content": [{"text": HEALTHY_RESPONSE}]}},
+                "stopReason": "end_turn",
+                "usage": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15},
+            },
+        )
+
+    app: Final = web.Application()
+    app.router.add_post("/{path:.*}", respond)
+    runner: Final = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", unused_tcp_port).start()
+    prefix: Final = "bedrock/arn:aws:bedrock:us-east-2:{account}:application-inference-profile/"
+    router: Final = Router(
+        model_list=[
+            {
+                "model_name": "claude-opus-5",
+                "litellm_params": {
+                    "model": f"{prefix.format(account=account)}{deployment}",
+                    "aws_region_name": "us-east-2",
+                    "aws_access_key_id": "offline-access-key",
+                    "aws_secret_access_key": "offline-secret-key",
+                    "api_base": f"http://127.0.0.1:{unused_tcp_port}",
+                    "order": order,
+                },
+                "model_info": {"id": deployment, "base_model": "us.anthropic.claude-opus-5"},
+            }
+            for order, (account, deployment) in enumerate(
+                (("000000000001", "denied-0"), ("000000000002", "healthy"))
+            )
+        ],
+        num_retries=2,
+        allowed_fails=100,
+    )
+    try:
+        call: Final = router.acompletion if entrypoint == "chat_completions" else router.anthropic_messages
+        response: Final = await call(
+            model="claude-opus-5",
+            messages=[{"role": "user", "content": "test"}],
+            max_tokens=64,
+            disable_fallbacks=True,
+        )
+        if entrypoint == "chat_completions":
+            assert response.choices[0].message.content == HEALTHY_RESPONSE
+        else:
+            assert response["content"][0]["text"] == HEALTHY_RESPONSE
+        assert [mock_call.args[0].rsplit("/", 2)[1] for mock_call in received.call_args_list] == ["denied-0", "healthy"]
+        blocked: Final = {
+            d["model_info"]["id"]: d["model_info"].get("blocked") is True
+            for d in router.get_model_list(model_name="claude-opus-5") or []
+        }
+        assert blocked == {"denied-0": True, "healthy": False}
     finally:
         router.reset()
         await runner.cleanup()

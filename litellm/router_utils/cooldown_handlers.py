@@ -7,9 +7,7 @@ Router cooldown handlers
 """
 
 import asyncio
-import json
 import math
-import re
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Final
@@ -41,10 +39,6 @@ else:
     Span = Any
 
 _ADVISOR_ORCHESTRATION_FAILURE_ATTR: Final = "_litellm_advisor_orchestration_failure"
-_BEDROCK_ACCOUNT_ACCESS_DENIED: Final = re.compile(
-    r"Access\s+to\s+Anthropic\s+models\s+is\s+not\s+allowed\s+for\s+this\s+account\.?",
-    re.IGNORECASE,
-)
 
 
 def mark_advisor_orchestration_failure(exception: BaseException) -> None:
@@ -64,24 +58,6 @@ def mark_advisor_orchestration_failure(exception: BaseException) -> None:
 def is_advisor_orchestration_failure(exception: BaseException | None) -> bool:
     """Whether ``exception`` was tagged by ``mark_advisor_orchestration_failure``."""
     return bool(getattr(exception, _ADVISOR_ORCHESTRATION_FAILURE_ATTR, False))
-
-
-def is_bedrock_account_access_denied(exception: BaseException | None) -> bool:
-    if not isinstance(exception, (litellm.BadRequestError, litellm.PermissionDeniedError)):
-        return False
-    if exception.llm_provider != "bedrock" or is_advisor_orchestration_failure(exception):
-        return False
-
-    bedrock_body: Final = exception.message.partition(" - ")[2].lstrip()
-    try:
-        payload: Final[object] = json.JSONDecoder().raw_decode(bedrock_body)[0]
-    except json.JSONDecodeError:
-        return False
-    if not isinstance(payload, dict):
-        return False
-
-    message: Final[object] = payload.get("message")
-    return isinstance(message, str) and _BEDROCK_ACCOUNT_ACCESS_DENIED.fullmatch(message.strip()) is not None
 
 
 _EXCEPTION_POLICY_FIELDS: Final[tuple[tuple[type, str], ...]] = (
@@ -330,7 +306,6 @@ def _should_run_cooldown_logic(
             deployment=deployment,
             original_exception=original_exception,
         )
-        or is_bedrock_account_access_denied(original_exception)
     ):
         verbose_router_logger.debug("Should Not Run Cooldown Logic: _is_cooldown_required returned False")
         return False
@@ -367,9 +342,6 @@ def _should_cooldown_deployment(
 
     - v1 logic (Legacy): if allowed fails or allowed fail policy set, coolsdown if num fails in this minute > allowed fails
     """
-    if is_bedrock_account_access_denied(original_exception):
-        return True
-
     model_group: Final = litellm_router_instance.get_model_group(id=deployment)
     is_single_deployment_model_group = False
     if model_group is not None and len(model_group) == 1:

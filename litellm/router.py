@@ -139,6 +139,9 @@ from litellm.router_utils.cooldown_handlers import (
     _get_cooldown_deployments,
     _set_cooldown_deployments,
     is_advisor_orchestration_failure,
+)
+from litellm.router_utils.denied_account_block import (
+    block_denied_bedrock_deployment,
     is_bedrock_account_access_denied,
 )
 from litellm.router_utils.fallback_event_handlers import (
@@ -7765,13 +7768,26 @@ class Router:
                     litellm_router_instance=self,
                     deployment_id=deployment_id,
                 )
+                requested_model_group: Final = (get_litellm_metadata_from_kwargs(kwargs) or {}).get("model_group")  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType, reportUnknownArgumentType]  # kwargs metadata is untyped  # mutable-ok: empty mapping fallback for the optional request metadata
+                if is_bedrock_account_access_denied(exception):  # pyright: ignore[reportUnknownArgumentType]  # kwargs-sourced exception is untyped here
+                    # The account-level denial needs an AWS-side fix, so the deployment is
+                    # paused via `blocked` rather than cooled down and retried.
+                    block_denied_bedrock_deployment(
+                        router=self,
+                        deployment_id=deployment_id,  # pyright: ignore[reportUnknownArgumentType]  # kwargs-sourced model_info id is untyped here
+                        exception=exception,  # pyright: ignore[reportUnknownArgumentType]  # kwargs-sourced exception is untyped here
+                        model_group=requested_model_group,  # pyright: ignore[reportUnknownArgumentType]  # derived from untyped kwargs metadata
+                    )
+                    # This function's contract is "did the deployment go into cooldown".
+                    # Blocking is not a cooldown, so the answer stays False.
+                    return False
                 result: Final = _set_cooldown_deployments(
                     litellm_router_instance=self,
                     exception_status=exception_status,
                     original_exception=exception,
                     deployment=deployment_id,
                     time_to_cooldown=_time_to_cooldown,
-                    requested_model_group=(get_litellm_metadata_from_kwargs(kwargs) or {}).get("model_group"),
+                    requested_model_group=requested_model_group,
                 )  # setting deployment_id in cooldown deployments
 
                 return result
