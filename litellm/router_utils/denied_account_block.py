@@ -12,9 +12,7 @@ filters on (``Router._filter_blocked_deployments``), and an alert goes to
 under the proxy, which makes it survive a reconcile, a restart, and reach peer pods.
 
 Scope is one deployment per match: a sibling on the same AWS account is paused when a
-request of its own hits the denial. Grouping by the ARN's account id was considered and
-dropped -- it only works for ARN models, and the extra failure it saves is one request per
-model.
+request of its own hits the denial.
 """
 
 from __future__ import annotations
@@ -25,7 +23,7 @@ import json
 import re
 import sys
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Final, cast  # noqa: TID251  # untyped router rows, raw_decode, sys.modules
+from typing import TYPE_CHECKING, Final, cast  # noqa: TID251  # untyped router rows, literal_eval, raw_decode, getattr
 
 import litellm
 from litellm._logging import verbose_router_logger
@@ -70,6 +68,13 @@ def _attribute(source: object, name: str) -> object:
     return cast(object, getattr(source, name, None))  # cast-ok: getattr on an untyped object
 
 
+def _as_mapping(value: object) -> Mapping[str, object] | None:
+    """``value`` as a string-keyed mapping, or None when it is not a mapping at all."""
+    if not isinstance(value, Mapping):
+        return None
+    return cast(Mapping[str, object], value)  # cast-ok: isinstance narrowing keeps the value type unknown
+
+
 def upstream_error_message(exception: BaseException) -> str | None:
     """The message Bedrock itself reported, or None when the body carries no top-level one.
 
@@ -87,9 +92,9 @@ def upstream_error_message(exception: BaseException) -> str | None:
         payload: Final[object] = cast(object, json.JSONDecoder().raw_decode(body)[0])  # cast-ok: raw_decode -> Any
     except json.JSONDecodeError:
         return body
-    if not isinstance(payload, Mapping):
+    fields: Final = _as_mapping(payload)
+    if fields is None:
         return None
-    fields: Final = cast(Mapping[str, object], payload)  # cast-ok: Mapping narrowing leaves values unknown
     # AWS is inconsistent about the case of this key across services and SDK versions.
     return next(
         (value for key, value in fields.items() if key.lower() == "message" and isinstance(value, str)),
@@ -97,45 +102,45 @@ def upstream_error_message(exception: BaseException) -> str | None:
     )
 
 
+def _denied_upstream_message(exception: BaseException | None) -> str | None:
+    """The upstream message when ``exception`` is Bedrock's account-level Anthropic denial."""
+    if not isinstance(exception, (litellm.BadRequestError, litellm.PermissionDeniedError)):
+        return None
+    if _attribute(exception, "llm_provider") != "bedrock" or is_advisor_orchestration_failure(exception):
+        return None
+    message: Final = upstream_error_message(exception)
+    if message is None or _ACCOUNT_ACCESS_DENIED.match(message.strip()) is None:
+        return None
+    return message
+
+
 def is_bedrock_account_access_denied(exception: BaseException | None) -> bool:
     """Whether ``exception`` is Bedrock's account-level Anthropic denial."""
-    if not isinstance(exception, (litellm.BadRequestError, litellm.PermissionDeniedError)):
-        return False
-    if _attribute(exception, "llm_provider") != "bedrock" or is_advisor_orchestration_failure(exception):
-        return False
-    message: Final = upstream_error_message(exception)
-    return message is not None and _ACCOUNT_ACCESS_DENIED.match(message.strip()) is not None
+    return _denied_upstream_message(exception) is not None
 
 
-def _deployment_row(router: Router, deployment_id: str) -> Mapping[str, object] | None:
-    """The live ``model_list`` entry for ``deployment_id``, or None when it is unknown."""
-    return cast(  # cast-ok: Router.get_model_info is typed as a bare dict
-        "Mapping[str, object] | None",
-        router.get_model_info(id=deployment_id),  # pyright: ignore[reportUnknownMemberType]  # bare dict
-    )
-
-
-def _mark_blocked(row: Mapping[str, object]) -> bool:
-    """Set ``blocked`` on the row's ``model_info``; False when it was already set.
+def _mark_row_blocked(router: Router, deployment_id: str) -> Mapping[str, object] | None:
+    """Set ``blocked`` on the deployment's row; None when it is unknown or already blocked.
 
     Writes into the live ``model_list`` entry on purpose: ``model_info.blocked`` is what
     every routing filter reads, so the pause takes effect on the next selection.
     """
-    model_info: Final[object] = row.get("model_info")
-    if not isinstance(model_info, dict):
-        return False
-    if model_info.get("blocked") is True:  # pyright: ignore[reportUnknownMemberType]  # bare-dict router row
-        return False
+    row: Final = cast(  # cast-ok: Router.get_model_info is typed as a bare dict
+        "Mapping[str, object] | None",
+        router.get_model_info(id=deployment_id),  # pyright: ignore[reportUnknownMemberType]  # bare dict
+    )
+    model_info: Final[object] = row.get("model_info") if row is not None else None
+    if not isinstance(model_info, dict) or model_info.get("blocked") is True:  # pyright: ignore[reportUnknownMemberType]  # bare-dict router row
+        return None
     model_info["blocked"] = True  # pyright: ignore[reportUnknownMemberType]  # bare-dict router row
-    return True
+    return row
 
 
 def _deployment_model(row: Mapping[str, object]) -> str | None:
     """The configured model string (an ARN for inference profiles), for the alert."""
-    litellm_params: Final[object] = row.get("litellm_params")
-    if not isinstance(litellm_params, Mapping):
+    params: Final = _as_mapping(row.get("litellm_params"))
+    if params is None:
         return None
-    params: Final = cast(Mapping[str, object], litellm_params)  # cast-ok: Mapping narrowing leaves values unknown
     model: Final[object] = params.get("model")
     return model if isinstance(model, str) else None
 
@@ -170,10 +175,11 @@ def block_denied_bedrock_deployment(
     Idempotent: the retries of one request, and the fallback path's own hook, all see the
     flag already set and neither re-alert nor re-write the DB.
     """
-    if not is_bedrock_account_access_denied(exception):
+    message: Final = _denied_upstream_message(exception)
+    if message is None:
         return False
-    row: Final = _deployment_row(router=router, deployment_id=deployment_id)
-    if row is None or not _mark_blocked(row):
+    row: Final = _mark_row_blocked(router=router, deployment_id=deployment_id)
+    if row is None:
         return False
 
     # Model-group info caches the group's deployments, so a stale entry would keep
@@ -192,7 +198,7 @@ def block_denied_bedrock_deployment(
             deployment_id=deployment_id,
             model=_deployment_model(row),
             model_group=model_group,
-            error=upstream_error_message(exception),
+            error=message,
         )
     )
     _schedule_blocked_persistence(deployment_id)
@@ -207,7 +213,7 @@ async def persist_blocked_deployment(deployment_id: str) -> bool:
     """
     # sys.modules rather than an import: the SDK must not pull the proxy's fastapi
     # dependency chain in, as litellm/passthrough/timeout_utils.py does for the same reason.
-    proxy_module: Final = cast(object, sys.modules.get("litellm.proxy.proxy_server"))  # cast-ok: untyped lookup
+    proxy_module: Final = sys.modules.get("litellm.proxy.proxy_server")
     if proxy_module is None:
         return False
     prisma_client: Final = _attribute(proxy_module, "prisma_client")
