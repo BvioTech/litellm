@@ -3,6 +3,7 @@ import json
 import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from typing import Final
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -2928,3 +2929,36 @@ def test_test_model_connection_accepts_image_edit_mode(monkeypatch):
 
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "success"
+
+
+def test_test_model_connection_accepts_decisions_and_sends_native_request(monkeypatch):
+    monkeypatch.setattr(litellm, "disable_aiohttp_transport", True)
+    litellm.in_memory_llm_clients_cache.flush_cache()
+    app: Final = FastAPI()
+    app.include_router(_health_endpoints_module.router)
+    app.dependency_overrides[user_api_key_auth] = lambda: UserAPIKeyAuth(user_role=LitellmUserRoles.PROXY_ADMIN)
+    monkeypatch.setattr("litellm.proxy.proxy_server.prisma_client", MagicMock())
+    with TestClient(app) as client, respx.mock(assert_all_called=True) as upstream:
+        route: Final = upstream.post("https://openrouter.ai/api/alpha/decisions").respond(
+            json={
+                "answers": {"healthy": {"type": "noul", "noul": 0.99}},
+                "usage": {"input_tokens": 30, "output_tokens": 3, "cost": 0.00000126},
+            }
+        )
+        response: Final = client.post(
+            "/health/test_connection",
+            json={
+                "mode": "decisions",
+                "model_info": {"mode": "decisions"},
+                "litellm_params": {"model": "openrouter/~typesafe/jev-latest", "api_key": "test-openrouter-key"},
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "success"
+    request: Final = route.calls.last.request
+    assert request.headers["authorization"] == "Bearer test-openrouter-key"
+    body: Final = json.loads(request.content)
+    assert body["model"] == "~typesafe/jev-latest"
+    assert body["questions"]["healthy"]["type"] == "noul"
+    assert "state" in body
+    assert "messages" not in body

@@ -1888,6 +1888,7 @@ async def test_model_connection(
         "realtime",
         "responses",
         "ocr",
+        "decisions",
     ]
     | None = fastapi.Body(
         None,

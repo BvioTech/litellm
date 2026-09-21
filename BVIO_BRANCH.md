@@ -98,6 +98,8 @@ model_list:
 
 `~typesafe/jev-latest` 是 OpenRouter 的滚动别名。需要固定版本时，配置 `openrouter/typesafe/jev-1.13`。模型可以通过现有配置文件或模型管理接口添加；调用时使用对外的 `model_name`
 
+在添加模型页面，Provider 选择 OpenRouter，Mode 选择 `Decisions - /decisions`。`Test Connect` 会发送一个原生判断请求来检查连接
+
 ```bash
 curl http://localhost:4000/v1/decisions \
   -H "Authorization: Bearer $LITELLM_API_KEY" \

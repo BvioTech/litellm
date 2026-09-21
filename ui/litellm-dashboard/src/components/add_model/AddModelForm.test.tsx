@@ -7,6 +7,7 @@ import { Providers } from "../provider_info_helpers";
 import { projectMountedValues, useMountRegistry, type MountedFormValues } from "../common_components/MountedFormField";
 import { useForm } from "react-hook-form";
 import AddModelForm from "./AddModelForm";
+import { prepareModelAddRequest } from "./handle_add_model_submit";
 
 vi.mock("../molecules/models/ProviderLogo", () => ({
   ProviderLogo: ({ provider, className }: { provider: string; className?: string }) => (
@@ -177,6 +178,30 @@ const createTestProps = (userRole = "proxy_admin", userId = "user-1", isTeamAdmi
 };
 
 describe("AddModelForm", () => {
+  it("lets the user select Decisions and saves it as the deployment mode", async () => {
+    const mockUseAuthorized = vi.mocked(await import("@/app/(dashboard)/hooks/useAuthorized"));
+    mockUseAuthorized.default.mockReturnValue(mockAuthorizedUser("proxy_admin", "user-1", true));
+    const props = createTestProps();
+
+    renderWithProviders(<AddModelForm {...props} />);
+    await userEvent.click(await screen.findByRole("combobox", { name: "Mode" }));
+    await userEvent.click(await screen.findByRole("option", { name: "Decisions - /decisions" }));
+
+    expect(screen.getByRole("combobox", { name: "Mode" })).toHaveTextContent("Decisions - /decisions");
+    expect(props.mountedValues().mode).toBe("decisions");
+    const deployments = await prepareModelAddRequest(
+      {
+        mode: props.mountedValues().mode,
+        custom_llm_provider: "OpenRouter",
+        model_mappings: [{ public_name: "jev-latest", litellm_model: "openrouter/~typesafe/jev-latest" }],
+      },
+      "test-access-token",
+      null,
+    );
+    expect(deployments?.[0].modelInfoObj.mode).toBe("decisions");
+    expect(deployments?.[0].litellmParamsObj).not.toHaveProperty("mode");
+  });
+
   it("should render", async () => {
     const mockUseAuthorized = vi.mocked(await import("@/app/(dashboard)/hooks/useAuthorized"));
     mockUseAuthorized.default.mockReturnValue(mockAuthorizedUser("proxy_admin", "user-1", true));

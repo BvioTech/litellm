@@ -12,6 +12,7 @@ export const TEST_MODES = [
   { value: "realtime", label: "Realtime - /realtime" },
   { value: "batch", label: "Batch - /batch" },
   { value: "ocr", label: "OCR - /ocr" },
+  { value: "decisions", label: "Decisions - /decisions" },
 ];
 
 // Define the available auto router routing strategies
