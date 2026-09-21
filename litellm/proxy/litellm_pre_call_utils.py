@@ -191,6 +191,7 @@ LITELLM_METADATA_ROUTES: Final = (
     "bedrock",
     "/v1/messages",
     "responses",
+    "decisions",
     "files",
 )
 

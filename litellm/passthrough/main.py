@@ -12,6 +12,7 @@ import httpx
 from httpx._types import CookieTypes, QueryParamTypes, RequestFiles
 
 from litellm._logging import verbose_logger
+from litellm.exceptions import BadRequestError
 from litellm.litellm_core_utils.get_llm_provider_logic import get_llm_provider
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
 from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
@@ -24,6 +25,15 @@ from .utils import BasePassthroughUtils
 if TYPE_CHECKING:
     from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
     from litellm.llms.base_llm.passthrough.transformation import BasePassthroughConfig
+
+
+def _validate_passthrough_provider(model: str, provider: str, required_provider: str | None) -> None:
+    if required_provider is not None and provider != required_provider:
+        raise BadRequestError(
+            message=f"This endpoint requires provider {required_provider}; the selected deployment uses {provider}",
+            model=model,
+            llm_provider=provider,
+        )
 
 
 @client
@@ -44,6 +54,7 @@ async def allm_passthrough_route(
     params: QueryParamTypes | None = None,
     cookies: CookieTypes | None = None,
     client: HTTPHandler | AsyncHTTPHandler | None = None,
+    _required_custom_llm_provider: str | None = None,
     **kwargs,
 ) -> httpx.Response | AsyncGenerator[Any, Any]:
     """
@@ -53,12 +64,15 @@ async def allm_passthrough_route(
         loop: Final = asyncio.get_event_loop()
         kwargs["allm_passthrough_route"] = True
 
-        model, custom_llm_provider, api_key, api_base = get_llm_provider(
+        model, custom_llm_provider, dynamic_api_key, dynamic_api_base = get_llm_provider(
             model=model,
             custom_llm_provider=custom_llm_provider,
             api_base=api_base,
             api_key=api_key,
         )
+        resolved_api_key: Final = dynamic_api_key or api_key
+        resolved_api_base: Final = dynamic_api_base or api_base
+        _validate_passthrough_provider(model, custom_llm_provider, _required_custom_llm_provider)
 
         from litellm.types.utils import LlmProviders
         from litellm.utils import ProviderConfigManager
@@ -79,8 +93,8 @@ async def allm_passthrough_route(
             endpoint=endpoint,
             model=model,
             custom_llm_provider=custom_llm_provider,
-            api_base=api_base,
-            api_key=api_key,
+            api_base=resolved_api_base,
+            api_key=resolved_api_key,
             request_query_params=request_query_params,
             request_headers=request_headers,
             content=content,
@@ -90,6 +104,7 @@ async def allm_passthrough_route(
             params=params,
             cookies=cookies,
             client=client,
+            _required_custom_llm_provider=_required_custom_llm_provider,
             **kwargs,
         )
 
@@ -114,6 +129,8 @@ async def allm_passthrough_route(
         # For HTTP errors, re-raise as-is to preserve the original error details
         # The caller (e.g., proxy layer) can handle conversion to appropriate response format
         raise e
+    except BadRequestError:
+        raise
     except Exception as e:
         # For other exceptions, use provider-specific error handling
         from litellm.types.utils import LlmProviders
@@ -169,6 +186,7 @@ def llm_passthrough_route(
     params: QueryParamTypes | None = None,
     cookies: CookieTypes | None = None,
     client: HTTPHandler | AsyncHTTPHandler | None = None,
+    _required_custom_llm_provider: str | None = None,
     **kwargs,
 ) -> (
     httpx.Response
@@ -192,14 +210,17 @@ def llm_passthrough_route(
 
     litellm_logging_obj: Final = cast("LiteLLMLoggingObj", kwargs.get("litellm_logging_obj"))
 
-    model, custom_llm_provider, api_key, api_base = get_llm_provider(
+    model, custom_llm_provider, dynamic_api_key, dynamic_api_base = get_llm_provider(
         model=model,
         custom_llm_provider=custom_llm_provider,
         api_base=api_base,
         api_key=api_key,
     )
+    resolved_api_key: Final = dynamic_api_key or api_key
+    resolved_api_base: Final = dynamic_api_base or api_base
+    _validate_passthrough_provider(model, custom_llm_provider, _required_custom_llm_provider)
 
-    litellm_params_dict: Final = get_litellm_params(api_key=api_key, api_base=api_base, **kwargs)
+    litellm_params_dict: Final = get_litellm_params(api_key=resolved_api_key, api_base=resolved_api_base, **kwargs)
 
     if client is None:
         from litellm.llms.custom_httpx.http_handler import (
@@ -244,8 +265,8 @@ def llm_passthrough_route(
         raise Exception(f"Provider {custom_llm_provider} not found")
 
     updated_url, base_target_url = provider_config.get_complete_url(
-        api_base=api_base,
-        api_key=api_key,
+        api_base=resolved_api_base,
+        api_key=resolved_api_key,
         model=model,
         endpoint=endpoint,
         request_query_params=request_query_params,
@@ -258,7 +279,7 @@ def llm_passthrough_route(
         updated_url = httpx.URL(encoded_url_str)
 
     # Add or update query parameters
-    provider_api_key: Final = provider_config.get_api_key(api_key)
+    provider_api_key: Final = provider_config.get_api_key(resolved_api_key)
 
     auth_headers: Final = provider_config.validate_environment(
         headers={},
@@ -285,8 +306,7 @@ def llm_passthrough_route(
     )
 
     ## SWAP MODEL IN JSON BODY [TODO: REFACTOR TO A provider_config.transform_request method]
-    if json and isinstance(json, dict) and "model" in json:
-        json["model"] = model
+    request_json: Final = {**json, "model": model} if isinstance(json, dict) and "model" in json else json
 
     request: Final = client.client.build_request(
         method=method,
@@ -294,7 +314,7 @@ def llm_passthrough_route(
         content=signed_json_body if signed_json_body is not None else content,
         data=data if (signed_json_body is None and content is None) else None,
         files=files,
-        json=json if (signed_json_body is None and content is None) else None,
+        json=request_json if (signed_json_body is None and content is None) else None,
         params=params,
         headers=headers,
         cookies=cookies,
@@ -303,14 +323,14 @@ def llm_passthrough_route(
     ## IS STREAMING REQUEST
     is_streaming_request: Final = provider_config.is_streaming_request(
         endpoint=endpoint,
-        request_data=data or json or {},
+        request_data=data or request_json or {},
     )
 
     # Update logging object with streaming status
     litellm_logging_obj.stream = is_streaming_request
 
     ## LOGGING PRE-CALL
-    request_data: Final = data if data else json
+    request_data: Final = data if data else request_json
     litellm_logging_obj.pre_call(
         input=request_data,
         api_key=provider_api_key,

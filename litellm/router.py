@@ -4824,7 +4824,7 @@ class Router:
         e.g for bedrock invoke users can pass endpoint as /model/special-bedrock-model/invoke
           it should be actually sent as /model/us.anthropic.claude-3-5-sonnet-20240620-v1:0/invoke
         """
-        if "endpoint" in kwargs and kwargs["endpoint"]:
+        if "endpoint" in kwargs and kwargs["endpoint"] and "/" in kwargs["endpoint"].strip("/"):
             # For provider-specific endpoints, strip the provider prefix from model_name
             # e.g., "bedrock/us.anthropic.claude-3-5-sonnet-20240620-v1:0" -> "us.anthropic.claude-3-5-sonnet-20240620-v1:0"
             from litellm import get_llm_provider
@@ -6492,7 +6492,7 @@ class Router:
             elif call_type == "allm_passthrough_route":
                 return await self._ageneric_api_call_with_fallbacks(
                     original_function=original_function,
-                    passthrough_on_no_deployment=True,
+                    passthrough_on_no_deployment=kwargs.pop("passthrough_on_no_deployment", True),
                     **kwargs,
                 )
             elif call_type in (

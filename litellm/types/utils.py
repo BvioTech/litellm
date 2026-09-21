@@ -302,6 +302,7 @@ class ModelInfoBase(ProviderSpecificModelInfo, total=False):
             "audio_transcription",
             "responses",
             "ocr",
+            "decisions",
             "realtime",
         ]
     ]

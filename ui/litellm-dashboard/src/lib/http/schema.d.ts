@@ -823,6 +823,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/alpha/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Decisions */
+        post: operations["decisions_alpha_decisions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/anthropic/{endpoint}": {
         parameters: {
             query?: never;
@@ -4113,6 +4130,23 @@ export interface paths {
         get: operations["get_memory_summary_debug_memory_summary_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Decisions */
+        post: operations["decisions_decisions_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -17448,6 +17482,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Decisions */
+        post: operations["decisions_v1_decisions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/embeddings": {
         parameters: {
             query?: never;
@@ -26184,6 +26235,64 @@ export interface components {
              */
             total_tokens: number;
         };
+        /** DecisionsChoiceQuestion */
+        DecisionsChoiceQuestion: {
+            /** Criteria */
+            criteria: {
+                [key: string]: string | {
+                    [key: string]: components["schemas"]["JsonValue"];
+                } | components["schemas"]["JsonValue"][] | null;
+            };
+            /** Instructions */
+            instructions: string | {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | components["schemas"]["JsonValue"][];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "choice";
+        };
+        /** DecisionsNoulCriteria */
+        DecisionsNoulCriteria: {
+            /** False */
+            false: string | {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | components["schemas"]["JsonValue"][];
+            /** True */
+            true: string | {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | components["schemas"]["JsonValue"][];
+        };
+        /** DecisionsNoulQuestion */
+        DecisionsNoulQuestion: {
+            criteria?: components["schemas"]["DecisionsNoulCriteria"] | null;
+            /** Instructions */
+            instructions: string | {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | components["schemas"]["JsonValue"][];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "noul";
+        };
+        /** DecisionsScoreQuestion */
+        DecisionsScoreQuestion: {
+            /** Criteria */
+            criteria: (string | {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | components["schemas"]["JsonValue"][])[];
+            /** Instructions */
+            instructions: string | {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | components["schemas"]["JsonValue"][];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "score";
+        };
         /**
          * DefaultInternalUserParams
          * @description Default parameters to apply when a new user signs in via SSO or is created on the /user/new API endpoint
@@ -27577,6 +27686,7 @@ export interface components {
             /** Updated By */
             updated_by?: string | null;
         };
+        JsonValue: unknown;
         /** KeyHealthResponse */
         KeyHealthResponse: {
             /**
@@ -32209,6 +32319,31 @@ export interface components {
              * @constant
              */
             type: "openIdConnect";
+        };
+        /** OpenRouterDecisionsRequest */
+        OpenRouterDecisionsRequest: {
+            /** Model */
+            model: string;
+            /** Provider */
+            provider?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | null;
+            /** Questions */
+            questions: {
+                [key: string]: components["schemas"]["DecisionsNoulQuestion"] | components["schemas"]["DecisionsChoiceQuestion"] | components["schemas"]["DecisionsScoreQuestion"];
+            };
+            /** Session Id */
+            session_id?: string | null;
+            /** State */
+            state: string | {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | components["schemas"]["JsonValue"][];
+            /** Trace */
+            trace?: {
+                [key: string]: components["schemas"]["JsonValue"];
+            } | null;
+            /** User */
+            user?: string | null;
         };
         /** OrgMember */
         OrgMember: {
@@ -39691,6 +39826,39 @@ export interface operations {
             };
         };
     };
+    decisions_alpha_decisions_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OpenRouterDecisionsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     anthropic_proxy_route_anthropic__endpoint__get: {
         parameters: {
             query?: never;
@@ -44621,6 +44789,39 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    decisions_decisions_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OpenRouterDecisionsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -60355,6 +60556,39 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    decisions_v1_decisions_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OpenRouterDecisionsRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

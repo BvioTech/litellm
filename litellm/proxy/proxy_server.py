@@ -573,6 +573,7 @@ try:
 except ImportError:
     build_billing_metrics_recorder = None
     shutdown_billing_metrics_recorder = None
+from litellm.proxy.decisions_endpoints.endpoints import router as decisions_router
 from litellm.proxy.middleware.in_flight_requests_middleware import (
     InFlightRequestsMiddleware,
 )
@@ -17922,6 +17923,7 @@ async def get_routes():
 #     return {"token": token}
 
 
+app.include_router(decisions_router)
 app.include_router(router)
 app.include_router(response_router)
 app.include_router(public_endpoints_router)

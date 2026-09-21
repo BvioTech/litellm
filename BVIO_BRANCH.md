@@ -80,6 +80,58 @@ Claude 的重新映射只作用于真实 Bedrock base model 解析为 `anthropic
 
 ## 模型配置
 
+### OpenRouter Jev Decisions
+
+Jev 使用 OpenRouter 的 [Decisions API](https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-questions-and-answers-request)，输入 `state` 和 `questions`，返回 `answers`。网关提供 `POST /v1/decisions`、`POST /decisions` 和 `POST /alpha/decisions`，其中 `/alpha/decisions` 兼容 OpenRouter SDK 从 `/v1` 基址推导 Decisions 地址的方式
+
+配置示例：
+
+```yaml
+model_list:
+  - model_name: jev-latest
+    litellm_params:
+      model: openrouter/~typesafe/jev-latest
+      api_key: os.environ/OPENROUTER_API_KEY
+    model_info:
+      mode: decisions
+```
+
+`~typesafe/jev-latest` 是 OpenRouter 的滚动别名。需要固定版本时，配置 `openrouter/typesafe/jev-1.13`。模型可以通过现有配置文件或模型管理接口添加；调用时使用对外的 `model_name`
+
+```bash
+curl http://localhost:4000/v1/decisions \
+  -H "Authorization: Bearer $LITELLM_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "jev-latest",
+    "state": {"ticket": "付款后页面一直空白"},
+    "questions": {
+      "is_bug": {
+        "type": "noul",
+        "instructions": "用户是否遇到了软件故障？"
+      },
+      "team": {
+        "type": "choice",
+        "instructions": "应该交给哪个团队处理？",
+        "criteria": {"payments": "支付问题", "account": "账号问题"}
+      },
+      "urgency": {
+        "type": "score",
+        "instructions": "问题有多紧急？",
+        "criteria": ["可以等待", "需要立即处理"]
+      }
+    }
+  }'
+```
+
+响应保留 OpenRouter 的 `answers`、实际模型版本、概率、置信度及 `usage`。请求支持 `user`、`provider`、`session_id` 和 `trace`。网关使用现有虚拟 key 鉴权、模型访问限制、部署选路、重试和费用日志；每次实际调用都检查 deployment 属于 OpenRouter，没有可用 deployment 时按失败处理
+
+上游地址默认为 `https://openrouter.ai/api/alpha/decisions`。部署的 `api_base` 或 `OPENROUTER_API_BASE` 以 `/v1` 结尾时，会替换为 `/alpha`；其他自定义基址后追加 `/decisions`。凭证优先使用 deployment 的 `api_key`，其次使用 `litellm.openrouter_key`、`OPENROUTER_API_KEY` 或 `OR_API_KEY`
+
+费用优先使用 OpenRouter 返回的 `usage.cost`，缺失时按模型表的输入 token 单价计算；当前 Jev 输出 token 单价为零。`mode: decisions` 的健康检查发送一个最小判断请求。此适配覆盖 Decisions HTTP 接口和 `litellm.allm_passthrough_route`；调用方需要提交原生 Decisions 请求
+
+### Bedrock application inference profile
+
 每条 application inference profile deployment 都应声明与真实模型匹配的 Bedrock `base_model`，并将 `model_info` 放在 `litellm_params` 的同一层
 
 ```yaml

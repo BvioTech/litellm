@@ -35752,6 +35752,28 @@
         "source": "https://openrouter.ai/switchpoint/router",
         "supports_tool_choice": true
     },
+    "openrouter/typesafe/jev-1.13": {
+        "max_input_tokens": 32000,
+        "input_cost_per_token": 4.2e-08,
+        "output_cost_per_token": 0.0,
+        "litellm_provider": "openrouter",
+        "mode": "decisions",
+        "supported_endpoints": [
+            "/decisions"
+        ],
+        "source": "https://openrouter.ai/typesafe/jev-1.13"
+    },
+    "openrouter/~typesafe/jev-latest": {
+        "max_input_tokens": 32000,
+        "input_cost_per_token": 4.2e-08,
+        "output_cost_per_token": 0.0,
+        "litellm_provider": "openrouter",
+        "mode": "decisions",
+        "supported_endpoints": [
+            "/decisions"
+        ],
+        "source": "https://openrouter.ai/~typesafe/jev-latest"
+    },
     "openrouter/undi95/remm-slerp-l2-13b": {
         "input_cost_per_token": 1.875e-06,
         "litellm_provider": "openrouter",

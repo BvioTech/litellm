@@ -8853,6 +8853,10 @@ class ProviderConfigManager:
         model: str,
         provider: LlmProviders,
     ) -> BasePassthroughConfig | None:
+        if LlmProviders.OPENROUTER == provider:
+            from litellm.llms.openrouter.decisions.transformation import OpenRouterDecisionsConfig
+
+            return OpenRouterDecisionsConfig()
         if LlmProviders.BEDROCK == provider:
             from litellm.llms.bedrock.passthrough.transformation import (
                 BedrockPassthroughConfig,

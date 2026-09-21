@@ -160,6 +160,7 @@ class HealthCheckHelpers:
             "batch",
             "responses",
             "ocr",
+            "decisions",
         ],
         Callable,
     ]:
@@ -250,6 +251,21 @@ class HealthCheckHelpers:
                 document={
                     "type": "document_url",
                     "document_url": TEST_PDF_URL,
+                },
+            ),
+            "decisions": lambda: litellm.allm_passthrough_route(
+                **{
+                    key: value
+                    for key, value in _filter_model_params(model_params=model_params).items()
+                    if key != "litellm_logging_obj"
+                },
+                method="POST",
+                endpoint="decisions",
+                _required_custom_llm_provider="openrouter",
+                json={
+                    "model": model,
+                    "state": "The service is responding.",
+                    "questions": {"healthy": {"type": "noul", "instructions": "Is the service responding?"}},
                 },
             ),
         }
