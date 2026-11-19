@@ -2642,6 +2642,8 @@ class BaseLLMHTTPHandler:
 
         if extra_body:
             data.update(extra_body)
+        if "input" in data:
+            data["input"] = BaseResponsesAPIConfig.strip_atlascloud_prompt_cache_breakpoints(data["input"], api_base)
         stream = bool(stream or data.get("stream"))
 
         # Preserve the OpenAI-style request context (not sent to the provider) for streaming
@@ -2820,6 +2822,8 @@ class BaseLLMHTTPHandler:
 
         if extra_body:
             data.update(extra_body)
+        if "input" in data:
+            data["input"] = BaseResponsesAPIConfig.strip_atlascloud_prompt_cache_breakpoints(data["input"], api_base)
         stream = bool(stream or data.get("stream"))
 
         # Preserve the OpenAI-style request context (not sent to the provider) for streaming
