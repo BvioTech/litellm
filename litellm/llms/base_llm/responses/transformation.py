@@ -1,5 +1,6 @@
 import types
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import httpx
@@ -354,3 +355,21 @@ class BaseResponsesAPIConfig(ABC):
             **data,
             "input": BaseResponsesAPIConfig.strip_custom_tool_call_namespace_from_responses_input(data["input"]),
         }
+
+    @staticmethod
+    def strip_atlascloud_prompt_cache_breakpoints(input_items: object, api_base: str) -> object:
+        if not isinstance(input_items, list) or httpx.URL(api_base).host != "api.atlascloud.ai":
+            return input_items
+
+        sanitized: Final = deepcopy(input_items)
+        for item in sanitized:
+            if not isinstance(item, dict):
+                continue
+            for field in ("content", "output"):
+                blocks = item.get(field)
+                if not isinstance(blocks, list):
+                    continue
+                for block in blocks:
+                    if isinstance(block, dict):
+                        block.pop("prompt_cache_breakpoint", None)
+        return sanitized

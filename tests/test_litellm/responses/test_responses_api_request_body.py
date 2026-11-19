@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 import litellm
-from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
+from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
 
 
 def _expected_dir() -> Path:
@@ -485,6 +485,63 @@ def test_responses_injection_point_marks_input_text_on_gpt_5_6():
         }
         assert body["input"][1] == {"role": "user", "content": "hi"}
         assert body["prompt_cache_options"] == {"mode": "explicit"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_call", [False, True])
+@pytest.mark.parametrize(
+    ("api_base", "remove_breakpoint", "override_input"),
+    [
+        ("https://api.atlascloud.ai/v1", True, False),
+        ("https://api.atlascloud.ai/v1", True, True),
+        ("https://api.openai.com/v1", False, False),
+        ("https://api.atlascloud.ai.example.com/v1", False, False),
+    ],
+)
+async def test_responses_removes_prompt_cache_breakpoints_only_at_atlascloud(
+    api_base, remove_breakpoint, override_input, async_call
+):
+    text_block = {"type": "input_text", "text": "Keep this exact text."}
+    marked = {**text_block, "prompt_cache_breakpoint": {"mode": "explicit"}}
+    original_input = [
+        {"type": "message", "role": "user", "content": [marked]},
+        {"type": "function_call_output", "call_id": "call_array", "output": [marked, text_block]},
+        {"type": "function_call_output", "call_id": "call_string", "output": '{"prompt_cache_breakpoint": true}'},
+    ]
+    original_snapshot = copy.deepcopy(original_input)
+    sent_requests = []
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        sent_requests.append(json.loads(request.content))
+        return httpx.Response(200, json=_minimal_responses_api_payload("resp_atlas_cache", "gpt-5.6"))
+
+    overrides = {"extra_body": {"input": original_input}} if override_input else {}
+    kwargs = {
+        "model": "openai/gpt-5.6",
+        "api_key": "fake-api-key",
+        "api_base": api_base,
+        "input": "overridden" if override_input else original_input,
+        **overrides,
+    }
+    transport = httpx.MockTransport(capture)
+    if async_call:
+        async with httpx.AsyncClient(transport=transport) as client:
+            handler = AsyncHTTPHandler()
+            handler.client = client
+            await litellm.aresponses(client=handler, **kwargs)
+    else:
+        with httpx.Client(transport=transport) as client:
+            handler = HTTPHandler()
+            handler.client = client
+            litellm.responses(client=handler, **kwargs)
+
+    expected = copy.deepcopy(original_snapshot)
+    if remove_breakpoint:
+        expected[0]["content"] = [text_block]
+        expected[1]["output"] = [text_block, text_block]
+    assert len(sent_requests) == 1
+    assert sent_requests[0]["input"] == expected
+    assert original_input == original_snapshot
 
 
 @pytest.mark.asyncio
