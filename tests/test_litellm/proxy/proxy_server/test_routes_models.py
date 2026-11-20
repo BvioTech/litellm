@@ -9,6 +9,7 @@ Pins (PR2):
 
 from __future__ import annotations
 
+from typing import Final
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,6 +17,7 @@ import pytest
 import litellm
 from litellm.proxy import proxy_server
 from litellm.proxy import utils as proxy_utils
+from litellm.proxy._types import LitellmUserRoles
 from litellm.proxy.utils import create_model_info_response
 
 from .conftest import normalize  # type: ignore[import-not-found]
@@ -30,6 +32,37 @@ def _stub_model_info_response(
         "created": 0,
         "owned_by": provider,
     }
+
+
+@pytest.mark.parametrize("path", ["/v1/models", "/models"])
+@pytest.mark.parametrize("scope", [None, "expand"])
+@pytest.mark.parametrize("anthropic", [False, True])
+def test_model_listing_sort_only_changes_order_and_preserves_metadata_and_response_format(
+    client, auth_as, model_listing_sort_router, path, scope, anthropic
+):
+    params: Final = {"include_metadata": "true", **({"scope": scope} if scope else {})}
+    headers: Final = {"anthropic-version": "2023-06-01"} if anthropic else {}
+    expected: Final = ["alpha", "beta", "zeta", "missing"]
+    with auth_as():
+        response: Final = client.get(path, params=params, headers=headers)
+        repeated: Final = client.get(path, params=params, headers=headers)
+    assert response.status_code == repeated.status_code == 200, response.text
+    assert [row["id"] for row in response.json()["data"]] == expected
+    assert repeated.json() == response.json()
+    if anthropic:
+        assert response.json()["first_id"] == expected[0]
+        assert response.json()["last_id"] == expected[-1]
+    else:
+        assert response.json()["object"] == "list"
+        assert response.json()["data"][0]["metadata"] == {"fallbacks": ["zeta"]}
+    assert model_listing_sort_router.get_model_names() == ["zeta", "alpha", "beta", "missing"]
+
+
+def test_model_listing_sort_keeps_key_access_restrictions(client, auth_as, model_listing_sort_router):
+    with auth_as(LitellmUserRoles.INTERNAL_USER, models=["zeta", "alpha"]):
+        response: Final = client.get("/v1/models")
+    assert response.status_code == 200, response.text
+    assert [row["id"] for row in response.json()["data"]] == ["alpha", "zeta"]
 
 
 @pytest.fixture
@@ -114,9 +147,9 @@ def test_get_models_anthropic_format_when_header_present(
     body = response.json()
     assert "object" not in body
     assert body["has_more"] is False
-    assert body["first_id"] == "gpt-4"
-    assert body["last_id"] == "claude-sonnet"
-    assert [m["id"] for m in body["data"]] == ["gpt-4", "claude-sonnet"]
+    assert body["first_id"] == "claude-sonnet"
+    assert body["last_id"] == "gpt-4"
+    assert [m["id"] for m in body["data"]] == ["claude-sonnet", "gpt-4"]
     for entry in body["data"]:
         assert entry["type"] == "model"
         assert entry["display_name"] == entry["id"]
@@ -149,7 +182,7 @@ def test_anthropic_format_exposes_token_limits(
         response = client.get(path, headers={"anthropic-version": "2023-06-01"})
 
     assert response.status_code == 200
-    gpt_4, claude = response.json()["data"]
+    claude, gpt_4 = response.json()["data"]
     assert claude["max_input_tokens"] == 200000
     assert claude["max_tokens"] == 64000
     assert "max_output_tokens" not in claude
@@ -182,7 +215,7 @@ def test_anthropic_format_carries_router_configured_token_limits(client, auth_as
         response = client.get(path, headers={"anthropic-version": "2023-06-01"})
 
     assert response.status_code == 200
-    gpt_4, claude = response.json()["data"]
+    claude, gpt_4 = response.json()["data"]
     assert (gpt_4["max_input_tokens"], gpt_4["max_tokens"]) == (300000, 32000)
     assert (claude["max_input_tokens"], claude["max_tokens"]) == (500000, 4096)
 

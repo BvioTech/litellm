@@ -105,7 +105,7 @@ async def test_model_list_default_keeps_unhealthy_models(patched_model_list):
     response = await proxy_server.model_list(
         user_api_key_dict=UserAPIKeyAuth(api_key="sk-test"),
     )
-    assert [m["id"] for m in response["data"]] == ["gpt-4", "claude-sonnet"]
+    assert [m["id"] for m in response["data"]] == ["claude-sonnet", "gpt-4"]
     patched_model_list.async_get_fully_unhealthy_model_names.assert_not_awaited()
 
 
@@ -182,7 +182,7 @@ async def test_model_list_general_setting_false_keeps_unhealthy_models(patched_m
     response = await proxy_server.model_list(
         user_api_key_dict=UserAPIKeyAuth(api_key="sk-test"),
     )
-    assert [m["id"] for m in response["data"]] == ["gpt-4", "claude-sonnet"]
+    assert [m["id"] for m in response["data"]] == ["claude-sonnet", "gpt-4"]
     patched_model_list.async_get_fully_unhealthy_model_names.assert_not_awaited()
 
 
@@ -194,7 +194,7 @@ async def test_model_list_non_boolean_general_setting_does_not_filter(patched_mo
     response = await proxy_server.model_list(
         user_api_key_dict=UserAPIKeyAuth(api_key="sk-test"),
     )
-    assert [m["id"] for m in response["data"]] == ["gpt-4", "claude-sonnet"]
+    assert [m["id"] for m in response["data"]] == ["claude-sonnet", "gpt-4"]
     patched_model_list.async_get_fully_unhealthy_model_names.assert_not_awaited()
 
 
@@ -220,7 +220,7 @@ async def test_model_list_no_router_does_not_filter(patched_model_list, monkeypa
     response = await proxy_server.model_list(
         user_api_key_dict=UserAPIKeyAuth(api_key="sk-test"),
     )
-    assert [m["id"] for m in response["data"]] == ["gpt-4", "claude-sonnet"]
+    assert [m["id"] for m in response["data"]] == ["claude-sonnet", "gpt-4"]
 
 
 @pytest.mark.asyncio
@@ -232,7 +232,7 @@ async def test_model_list_general_setting_no_health_state_keeps_all_models(patch
     response = await proxy_server.model_list(
         user_api_key_dict=UserAPIKeyAuth(api_key="sk-test"),
     )
-    assert [m["id"] for m in response["data"]] == ["gpt-4", "claude-sonnet"]
+    assert [m["id"] for m in response["data"]] == ["claude-sonnet", "gpt-4"]
 
 
 @pytest.mark.asyncio

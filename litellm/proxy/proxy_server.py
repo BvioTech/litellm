@@ -350,7 +350,7 @@ from litellm.proxy.common_utils.load_config_utils import (
     get_file_contents_from_s3,
 )
 from litellm.proxy.common_utils.model_deprecation import collect_model_deprecations
-from litellm.proxy.common_utils.model_listing_utils import TeamModelNameTranslator
+from litellm.proxy.common_utils.model_listing_utils import TeamModelNameTranslator, sort_model_listing_entries
 from litellm.proxy.common_utils.openai_endpoint_utils import (
     remove_sensitive_info_from_deployment,
 )
@@ -10088,6 +10088,10 @@ async def model_list(
 
     This is just for compatibility with openai projects like aider.
 
+    Models are ordered by ascending numeric `model_info.sort_order`. Missing, non-numeric,
+    and non-finite values sort last. Ties use the public model ID in ascending order.
+    For a model with multiple deployments, the smallest valid configured value is used.
+
     Query Parameters:
     - include_metadata: Include additional metadata in the response with fallback information
     - fallback_type: Type of fallbacks to include ("general", "context_window", "content_policy")
@@ -10198,7 +10202,10 @@ async def model_list(
         # The internal routing key drives the metadata/fallback lookup, while the
         # public name is what the client sees as the model id.
         model_data = []
-        for response_id, lookup_id in TeamModelNameTranslator.listing_entries(all_models, llm_router, settings):
+        admin_entries: Final = TeamModelNameTranslator.listing_entries(all_models, llm_router, settings)
+        for response_id, lookup_id in sort_model_listing_entries(
+            admin_entries, llm_router, team_id or user_api_key_dict.team_id
+        ):
             model_info = create_model_info_response(
                 model_id=lookup_id,
                 provider="openai",
@@ -10242,7 +10249,8 @@ async def model_list(
     # The internal routing key drives the metadata/fallback lookup, while the
     # public name is what the client sees as the model id.
     model_data = []
-    for response_id, lookup_id in TeamModelNameTranslator.listing_entries(all_models, llm_router, settings):
+    entries: Final = TeamModelNameTranslator.listing_entries(all_models, llm_router, settings)
+    for response_id, lookup_id in sort_model_listing_entries(entries, llm_router, team_id or user_api_key_dict.team_id):
         model_info = create_model_info_response(
             model_id=lookup_id,
             provider="openai",

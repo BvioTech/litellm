@@ -12,9 +12,13 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Dict, Iterator, List, Optional
+from typing import TYPE_CHECKING, Final
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+if TYPE_CHECKING:
+    from litellm import Router
 
 # Repo root, anchored to this file (not CWD) so the path is correct no
 # matter where pytest is invoked from. With the project installed via
@@ -63,6 +67,30 @@ def normalize(data: Any, volatile: frozenset[str] = VOLATILE_KEYS) -> Any:
 # ---------------------------------------------------------------------------
 # app + client — session-scoped so app import + TestClient setup amortize
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def model_listing_sort_router(monkeypatch: pytest.MonkeyPatch) -> Router:
+    from litellm import Router
+    from litellm.proxy import proxy_server
+
+    router: Final = Router(
+        model_list=[
+            {
+                "model_name": name,
+                "litellm_params": {"model": "openai/gpt-4o", "api_key": "sk-fake"},
+                "model_info": {"id": f"{name}-id", "sort_order": rank},
+            }
+            for name, rank in (("zeta", 10), ("alpha", 2), ("beta", 2), ("missing", None))
+        ],
+        fallbacks=[{"alpha": ["zeta"]}],
+    )
+    monkeypatch.setattr(proxy_server, "llm_router", router)
+    monkeypatch.setattr(proxy_server, "llm_model_list", router.get_model_list())
+    monkeypatch.setattr(proxy_server, "prisma_client", None)
+    monkeypatch.setattr(proxy_server, "general_settings", {})
+    monkeypatch.setattr(proxy_server, "user_model", None)
+    return router
 
 
 @pytest.fixture(scope="session")

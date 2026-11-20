@@ -10,11 +10,54 @@ legacy internal names with `general_settings.use_team_public_model_name: false`.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from math import isfinite
 from typing import TYPE_CHECKING, Final, cast
+
+from pydantic import TypeAdapter, ValidationError
 
 if TYPE_CHECKING:
     from litellm.router import Router
+
+
+_SORT_FIELDS: Final = TypeAdapter(Mapping[str, object])
+_SORT_DEPLOYMENTS: Final = TypeAdapter(tuple[Mapping[str, object], ...])
+
+
+def _model_info_sort_order(model_info: object) -> int | float | None:
+    try:
+        fields: Final = _SORT_FIELDS.validate_python(model_info, strict=True)
+    except ValidationError:
+        return None
+    value: Final = fields.get("sort_order")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return None if isinstance(value, float) and not isfinite(value) else value
+
+
+def _model_group_sort_order(lookup_id: str, llm_router: Router | None, team_id: str | None) -> int | float | None:
+    if llm_router is None:
+        return None
+    deployments: Final = _SORT_DEPLOYMENTS.validate_python(
+        llm_router.get_model_list(model_name=lookup_id, team_id=team_id) or ()
+    )
+    return min(
+        (
+            value
+            for deployment in deployments
+            if (value := _model_info_sort_order(deployment.get("model_info"))) is not None
+        ),
+        default=None,
+    )
+
+
+def sort_model_listing_entries(
+    entries: Sequence[tuple[str, str]],
+    llm_router: Router | None,
+    team_id: str | None = None,
+) -> tuple[tuple[str, str], ...]:
+    values: Final = {entry: _model_group_sort_order(entry[1], llm_router, team_id) for entry in entries}
+    return tuple(sorted(entries, key=lambda entry: (values[entry] is None, values[entry] or 0, entry)))
 
 
 class TeamModelNameTranslator:

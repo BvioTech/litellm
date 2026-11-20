@@ -9184,6 +9184,10 @@ export interface paths {
          *
          *     This is just for compatibility with openai projects like aider.
          *
+         *     Models are ordered by ascending numeric `model_info.sort_order`. Missing, non-numeric,
+         *     and non-finite values sort last. Ties use the public model ID in ascending order.
+         *     For a model with multiple deployments, the smallest valid configured value is used.
+         *
          *     Query Parameters:
          *     - include_metadata: Include additional metadata in the response with fallback information
          *     - fallback_type: Type of fallbacks to include ("general", "context_window", "content_policy")
@@ -18824,6 +18828,10 @@ export interface paths {
          * @description Use `/model/info` - to get detailed model information, example - pricing, mode, etc.
          *
          *     This is just for compatibility with openai projects like aider.
+         *
+         *     Models are ordered by ascending numeric `model_info.sort_order`. Missing, non-numeric,
+         *     and non-finite values sort last. Ties use the public model ID in ascending order.
+         *     For a model with multiple deployments, the smallest valid configured value is used.
          *
          *     Query Parameters:
          *     - include_metadata: Include additional metadata in the response with fallback information
